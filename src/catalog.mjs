@@ -729,10 +729,44 @@ export function routedModel(template, model, behaviorTemplate = template) {
     // opt in after their tool and encrypted-payload relay paths are verified.
     multi_agent_version: model.multiAgentVersion || "v1",
   };
+
+  // BEGIN local-cliproxy-gpt56-native-capability-parity
+  //
+  // CLIProxy GPT routes are the same native GPT model family behind a
+  // different transport. They intentionally retain routed transport controls,
+  // context policy, search routing, and multi-agent version, while inheriting
+  // safe model-semantic capabilities from their exact native behavior twin.
+  const cliProxyNativeParity =
+    String(model.slug) === "cliproxy/gpt-5.6-sol" ||
+    String(model.slug) === "cliproxy/gpt-5.6-terra" ||
+    String(model.slug) === "cliproxy/gpt-5.6-luna" ||
+    String(model.slug) === "cliproxy/gpt-6-astra";
+
+  if (cliProxyNativeParity) {
+    const nativeSemanticCapabilities = [
+      "include_skills_usage_instructions",
+      "include_plugin_usage_instructions",
+      "include_apps_usage_instructions",
+      "tool_mode",
+      "support_verbosity",
+      "default_verbosity",
+      "supports_image_detail_original",
+    ];
+
+    for (const key of nativeSemanticCapabilities) {
+      if (Object.prototype.hasOwnProperty.call(behaviorTemplate, key)) {
+        next[key] = behaviorTemplate[key];
+      }
+    }
+  }
+  // END local-cliproxy-gpt56-native-capability-parity
+
   // Native GPT-5.6 templates may carry this transport/tool-mode switch. It is
   // not a routed capability and must stay out even when that native entry is
   // also the conservative fallback template.
-  delete next.tool_mode;
+
+  // CLIProxy GPT is the narrow verified native-model exception.
+  if (!cliProxyNativeParity) delete next.tool_mode;
   // ClinePass strips these unsupported request controls, so Codex must not offer them.
   if (model.requestProfile === "clinepass") {
     delete next.default_reasoning_level;
