@@ -644,6 +644,28 @@ function stripSearchContentTypes(tools) {
  * was never present. Requests with tool_choice but no tools field are forwarded as-is
  * for profiles that need them.
  */
+function stripInternalChatMessageMetadataPassthrough(payload) {
+  if (!Array.isArray(payload?.input)) return false;
+
+  let changed = false;
+
+  for (const item of payload.input) {
+    if (
+      item &&
+      typeof item === "object" &&
+      Object.prototype.hasOwnProperty.call(
+        item,
+        "internal_chat_message_metadata_passthrough",
+      )
+    ) {
+      delete item.internal_chat_message_metadata_passthrough;
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
 function stripEmptyTools(payload) {
   let changed = false;
   const hadEmptyTools = Array.isArray(payload.tools) && payload.tools.length === 0;
@@ -704,6 +726,17 @@ function normalizeBody(buffer, contentType, route) {
     const error = new Error(`Model ${model.gatewayModel} does not support ${route}.`);
     error.status = 400;
     throw error;
+  }
+
+  if (
+    provider.id === "cliproxy" &&
+    stripInternalChatMessageMetadataPassthrough(payload)
+  ) {
+    if (!QUIET) {
+      console.error(
+        `[api-forwarder] model=${model.gatewayModel} stripped ChatGPT internal message metadata passthrough`,
+      );
+    }
   }
 
   payload.model = model.upstreamModel;
