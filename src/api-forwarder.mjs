@@ -514,6 +514,29 @@ function trimTrailingModelTurns(messages) {
   return trimmed;
 }
 
+function stripInternalChatMessageMetadataPassthrough(payload) {
+  if (!Array.isArray(payload?.input)) return false;
+
+  let changed = false;
+
+  for (const item of payload.input) {
+    if (
+      item &&
+      typeof item === "object" &&
+      Object.prototype.hasOwnProperty.call(
+        item,
+        "internal_chat_message_metadata_passthrough",
+      )
+    ) {
+      delete item.internal_chat_message_metadata_passthrough;
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+
 function sanitizeChatToolHistory(messages, provider, model) {
   if (!Array.isArray(messages)) return messages;
   const repaired = ensureToolResultsForCalls(coalesceAssistantMessages(messages));
@@ -804,6 +827,24 @@ function normalizeBody(buffer, contentType, route) {
   if (Array.isArray(payload.messages)) {
     payload.messages = sanitizeChatToolHistory(payload.messages, provider, model);
   }
+  // Codex can attach ChatGPT-internal conversation metadata to Responses input
+  // items after compaction/resume. CLIProxy speaks the public Responses
+  // contract and rejects this private field as an unknown parameter.
+  //
+  // Keep the compatibility boundary exact: strip only this measured
+  // ChatGPT-internal field, only on CLIProxy routes, immediately before the
+  // provider request leaves the forwarder.
+  if (
+    provider.id === "cliproxy" &&
+    stripInternalChatMessageMetadataPassthrough(payload)
+  ) {
+    if (!QUIET) {
+      console.error(
+        `[api-forwarder] model=${model.gatewayModel} stripped ChatGPT internal message metadata passthrough`,
+      );
+    }
+  }
+
   if (provider.authProfile === "github-copilot") {
     // This is native ChatGPT account metadata, not an upstream scheduling
     // request Copilot accepts.
