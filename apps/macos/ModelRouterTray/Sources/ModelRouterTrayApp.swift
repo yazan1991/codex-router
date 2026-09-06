@@ -3264,11 +3264,10 @@ final class RouterStore: ObservableObject {
 
   private func refreshActivity() async {
     do {
-      // `control health` uses the protected health leaf and projects away the
-      // forwarders' credential metadata. The public `/health` endpoint is
-      // intentionally too small for the service rows below.
-      let data = try await runControl(arguments: ["health", "--json"])
-      let health = try JSONDecoder().decode(RouterHealth.self, from: data)
+      // The protected health leaf, read natively. The public `/health` endpoint
+      // is intentionally too small for the service rows below, and this poll
+      // runs once a second, so it must not spawn a process: see RouterHealthProbe.
+      let health = try await RouterHealthProbe.read()
       let previousActivityState = activityState
       let nextActiveRequests = health.activity.active ?? []
       let nextActiveRequestCount = health.activity.activeCount ?? nextActiveRequests.count
@@ -3830,21 +3829,10 @@ final class RouterStore: ObservableObject {
   }
 
   private func recordedInstallSourceRoot() -> URL? {
-    let environment = ProcessInfo.processInfo.environment
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    let stateDirectory: URL
-    if let configured = environment["MODEL_ROUTER_STATE_DIR"]
-      ?? environment["CODEX_ROUTER_STATE_DIR"]
-      ?? environment["KIMI_CODEX_STATE_DIR"],
-      !configured.isEmpty
-    {
-      stateDirectory = URL(fileURLWithPath: configured, isDirectory: true)
-    } else {
-      let codexHome = environment["CODEX_HOME"].flatMap { $0.isEmpty ? nil : $0 }
-        .map { URL(fileURLWithPath: $0, isDirectory: true) }
-        ?? home.appendingPathComponent(".codex", isDirectory: true)
-      stateDirectory = codexHome.appendingPathComponent("codex-router", isDirectory: true)
-    }
+    let stateDirectory = RouterStateDirectory.resolve(
+      environment: ProcessInfo.processInfo.environment,
+      home: FileManager.default.homeDirectoryForCurrentUser
+    )
     return RouterInstallManifestPolicy.sourceRoot(stateDirectory: stateDirectory)
   }
 }
@@ -3863,6 +3851,97 @@ private struct RouterHealth: Decodable, Equatable {
 private struct RouterServiceHealth: Decodable, Equatable {
   let reachable: Bool?
   let enabled: Bool?
+}
+
+// paths.mjs: MODEL_ROUTER_STATE_DIR, then the managed aliases, then
+// `$CODEX_HOME/codex-router` with CODEX_HOME defaulting to `~/.codex`. An empty
+// value falls through exactly as `||` does in Node.
+enum RouterStateDirectory {
+  static func resolve(environment: [String: String], home: URL) -> URL {
+    let configured = ["MODEL_ROUTER_STATE_DIR", "CODEX_ROUTER_STATE_DIR", "KIMI_CODEX_STATE_DIR"]
+      .compactMap { environment[$0] }
+      .first { !$0.isEmpty }
+    if let configured {
+      return URL(fileURLWithPath: configured, isDirectory: true)
+    }
+    let codexHome = environment["CODEX_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+      .map { URL(fileURLWithPath: $0, isDirectory: true) }
+      ?? home.appendingPathComponent(".codex", isDirectory: true)
+    return codexHome.appendingPathComponent("codex-router", isDirectory: true)
+  }
+}
+
+// The tray polls health once a second. `bin/control health --json` boots Node
+// and control.mjs's whole module graph to make one loopback GET: about a second
+// of CPU per call, so the poll alone kept a core busy for as long as the tray
+// ran. This is the same GET against the same protected leaf, natively, in about
+// a millisecond. control-health.mjs stays the contract for the CLI and the
+// Control Center; RouterHealth's Decodable keys are that same projection, so the
+// forwarders' credential metadata still never reaches tray state.
+enum RouterHealthProbe {
+  private static let session: URLSession = {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.timeoutIntervalForRequest = 3
+    configuration.timeoutIntervalForResource = 3
+    // The caller key is a path segment. This request never leaves loopback, so
+    // never hand it to a system proxy that claims 127.0.0.1.
+    configuration.connectionProxyDictionary = [kCFNetworkProxiesHTTPEnable as AnyHashable: 0]
+    return URLSession(configuration: configuration)
+  }()
+
+  // paths.mjs `port()`: the first non-empty alias wins, and an invalid value is
+  // an error rather than a fallback to the default. Node parses the value with
+  // `Number()`, which accepts surrounding whitespace, `4202.0`, and `4.202e3`;
+  // parse as a Double first so a port the router accepted is accepted here.
+  static func routerPort(environment: [String: String]) throws -> Int {
+    let value = ["MODEL_ROUTER_PORT", "CODEX_ROUTER_PORT", "KIMI_ROUTER_PORT"]
+      .compactMap { environment[$0] }
+      .first { !$0.isEmpty } ?? "4202"
+    guard let number = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)),
+      number.isFinite, number == number.rounded(), number >= 1, number <= 65_535
+    else {
+      throw RouterError("MODEL_ROUTER_PORT must be a TCP port between 1 and 65535.")
+    }
+    return Int(number)
+  }
+
+  // caller-auth.mjs `validCallerSecret`: at least 32 characters of [A-Za-z0-9_-].
+  static func callerSecret(stateDirectory: URL) -> String? {
+    let path = stateDirectory.appendingPathComponent("caller-secret", isDirectory: false)
+    guard let secret = (try? String(contentsOf: path, encoding: .utf8))?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+      secret.range(of: "^[A-Za-z0-9_-]{32,}$", options: .regularExpression) != nil
+    else { return nil }
+    return secret
+  }
+
+  static func healthURL(environment: [String: String], home: URL) throws -> URL {
+    let port = try routerPort(environment: environment)
+    let stateDirectory = RouterStateDirectory.resolve(environment: environment, home: home)
+    guard let secret = callerSecret(stateDirectory: stateDirectory) else {
+      throw RouterError("The local router caller key is missing or invalid; run ./bin/doctor --fix.")
+    }
+    guard let url = URL(string: "http://127.0.0.1:\(port)/_codex-router/\(secret)/v1/health") else {
+      throw RouterError("The local router health URL could not be built.")
+    }
+    return url
+  }
+
+  fileprivate static func read() async throws -> RouterHealth {
+    var request = URLRequest(
+      url: try healthURL(
+        environment: ProcessInfo.processInfo.environment,
+        home: FileManager.default.homeDirectoryForCurrentUser
+      )
+    )
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    // A 503 still carries the degraded list and the service rows, so decode
+    // every response and let the body's own `ok` say whether the router is
+    // ready. Transport failures throw, which the caller records as a health
+    // failure exactly as it did when `control health` could not run.
+    let (data, _) = try await session.data(for: request)
+    return try JSONDecoder().decode(RouterHealth.self, from: data)
+  }
 }
 
 private enum TrayServiceHealthState: Equatable {
