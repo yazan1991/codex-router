@@ -12,6 +12,8 @@ const {
   MULTI_AGENT_STATE_PATH,
   applyMultiAgentCapabilities,
   applyMultiAgentSettings,
+  codexAgentDefinitionModels,
+  subagentEligibleModels,
   readAllMultiAgent,
   readMultiAgentSettings,
   setMultiAgentMode,
@@ -176,4 +178,69 @@ test("legacy all-on switch still enables all-models mode", () => {
     mode: 0o600,
   });
   assert.equal(readAllMultiAgent(), true);
+});
+
+test("Codex agent definitions include ChatGPT Web Compatibility V1 without granting V2 authority", () => {
+  const models = [
+    {
+      slug: "chatgpt-web/high",
+      provider: "chatgpt-web",
+      multiAgentVersion: "v1",
+    },
+    {
+      slug: "chatgpt-web/pro",
+      provider: "chatgpt-web",
+      multiAgentVersion: "v1",
+    },
+    {
+      slug: "cliproxy/gpt-5.6-sol",
+      provider: "cliproxy",
+      multiAgentVersion: "v2",
+    },
+    {
+      slug: "other/v1-model",
+      provider: "other",
+      multiAgentVersion: "v1",
+    },
+  ];
+
+  const settings = {
+    version: 2,
+    mode: "all",
+    enabled: [],
+    disabled: [],
+  };
+
+  assert.deepEqual(
+    codexAgentDefinitionModels(models, settings).map((model) => model.slug),
+    [
+      "chatgpt-web/high",
+      "chatgpt-web/pro",
+      "cliproxy/gpt-5.6-sol",
+    ],
+  );
+
+  assert.deepEqual(
+    subagentEligibleModels(models, settings).map((model) => model.slug),
+    ["cliproxy/gpt-5.6-sol"],
+  );
+});
+
+test("disabled ChatGPT Web V1 model is not published as a Codex agent definition", () => {
+  const models = [
+    {
+      slug: "chatgpt-web/high",
+      provider: "chatgpt-web",
+      multiAgentVersion: "v1",
+    },
+  ];
+
+  const settings = {
+    version: 2,
+    mode: "all",
+    enabled: [],
+    disabled: ["chatgpt-web/high"],
+  };
+
+  assert.deepEqual(codexAgentDefinitionModels(models, settings), []);
 });

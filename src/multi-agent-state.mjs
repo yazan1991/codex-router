@@ -210,6 +210,11 @@ export function applyMultiAgentSettings(models, settings, hidden = new Set()) {
     if (hidden.has(model.slug) || disabled.has(slug)) {
       return { ...model, multiAgentVersion: "v1" };
     }
+    // ChatGPT Web runs collaboration through Compatibility V1.
+    // Never promote these cross-backend routes to encrypted V2 payloads.
+    if (model.provider === "chatgpt-web") {
+      return { ...model, multiAgentVersion: "v1" };
+    }
     if (model.multiAgentVersion === "v2") return model;
     if (mode === "all" || (mode === "selected" && enabled.has(slug))) {
       return { ...model, multiAgentVersion: "v2", subagentSelectedByOperator: true };
@@ -250,6 +255,22 @@ export function subagentEligibleModels(models, settings) {
     (model) =>
       model.multiAgentVersion === "v2" && !disabled.has(String(model.slug)),
   );
+}
+
+// Codex agent definition files are not themselves a v2 certification.
+// Keep the generic Router delegation authority above v2-only, while also
+// publishing Compatibility V1 definitions for ChatGPT Web. Codex filters
+// spawn_agent overrides by the parent's catalog multi_agent_version, so a
+// Web V1 parent can see Web V1 children without advertising those children
+// to a native/CLIProxy V2 parent.
+export function codexAgentDefinitionModels(models, settings) {
+  const disabled = new Set(settings?.disabled || []);
+  return models.filter((model) => {
+    const slug = String(model.slug || "");
+    if (disabled.has(slug)) return false;
+    if (model.multiAgentVersion === "v2") return true;
+    return model.provider === "chatgpt-web" && model.multiAgentVersion === "v1";
+  });
 }
 
 // Compatibility helper for the original all-models switch.
