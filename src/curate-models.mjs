@@ -504,7 +504,7 @@ async function main() {
     ? undefined
     : uniformProviderFamilyRequestProfile(CHECKED_IN_MODELS, familyProviderIds);
 
-  // Which models exist is decided by the provider's own /v1/models endpoint.
+  // Which models exist is decided by the provider's own catalog endpoint.
   // Metadata comes from that catalog, the interactive user, or the narrow
   // documented OpenCode exceptions whose catalog records omit their size.
   // Existing curated entries are never touched.
@@ -515,10 +515,34 @@ async function main() {
       ...(flagEfforts || {}),
       ...(discovery.free?.includes(id) ? { isFree: true } : {}),
     };
+    const live = providerId === "chatgpt-web"
+      ? Array.isArray(discovery.modelMetadata)
+        ? discovery.modelMetadata.find((entry) => entry?.upstreamId === id)
+        : discovery.modelMetadata?.[id]
+      : undefined;
+    // The ChatGPT Web launcher owns these catalog rows and derives them from
+    // the signed-in account. Preserve the presentation and safe curation
+    // metadata it publishes instead of replacing those account-specific facts
+    // with generic defaults. Routing profiles and collaboration certificates
+    // remain outside this untrusted catalog boundary.
+    if (live) {
+      if (typeof live?.displayName === "string" && live.displayName) {
+        metadata.displayName = live.displayName;
+      }
+      if (typeof live?.description === "string" && live.description) {
+        metadata.description = live.description;
+      }
+      if (Array.isArray(live?.inputModalities) && live.inputModalities.length) {
+        metadata.inputModalities = live.inputModalities;
+      }
+    }
     // The served catalog value wins when present. OpenCode's exact documented
     // free-model size is the fallback for its id-only Zen catalog; every other
     // silent catalog still gets the conservative generic default.
     const advertised = curatedSizing(discovery.contextLengths?.[id]);
+    if (advertised && Number.isInteger(live?.autoCompact) && live.autoCompact <= advertised.contextWindow) {
+      advertised.autoCompact = live.autoCompact;
+    }
     const documented = curatedSizing(curatedModelContextLength(providerId, id));
     const sizing = advertised || documented;
     if (sizing) Object.assign(metadata, sizing);
@@ -527,8 +551,10 @@ async function main() {
     // model ships the single conservative `high` level whatever it supports
     // (#352). An explicit --efforts is the operator speaking and still wins.
     const documentedEfforts = curatedModelReasoningLevels(providerId, id);
-    if (!flagEfforts && documentedEfforts) {
-      Object.assign(metadata, parseEfforts(documentedEfforts.join(",")) || {});
+    const liveEfforts = Array.isArray(live?.reasoningEfforts) ? live.reasoningEfforts : undefined;
+    if (!flagEfforts && (liveEfforts || documentedEfforts)) {
+      Object.assign(metadata, parseEfforts((liveEfforts || documentedEfforts).join(",")) || {});
+      if (liveEfforts?.includes(live.defaultEffort)) metadata.defaultEffort = live.defaultEffort;
     }
     // Zen's /models catalog publishes ids only, so image input has to come
     // from the same documented free-id table as the window and effort ladder.
@@ -558,6 +584,7 @@ async function main() {
     let omitContextNote = Boolean(advertised);
     let omitReasoningNote = Boolean(flagEfforts);
     const describe = () => {
+      if (live?.description) return;
       if (!documented && !documentedEfforts) {
         // Nothing documented, but the provider's own catalog may have sized
         // the model or named its input. The generic entry text calls its
