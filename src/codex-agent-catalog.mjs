@@ -60,6 +60,13 @@ export function routedAgentDefinition(model) {
     `description = ${tomlString(`${displayName} agent routed through an authenticated Codex Router provider.`)}`,
     'model_provider = "codex-router"',
     `model = ${tomlString(slug)}`,
+    ...(model.defaultEffort || model.defaultReasoningLevel || model.default_reasoning_level
+      ? [
+          `model_reasoning_effort = ${tomlString(
+            model.defaultEffort || model.defaultReasoningLevel || model.default_reasoning_level,
+          )}`,
+        ]
+      : []),
     "",
     'developer_instructions = """',
     "Complete the bounded task assigned by the parent agent.",

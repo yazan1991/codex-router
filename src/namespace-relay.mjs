@@ -515,6 +515,18 @@ export function injectSessionModelForSpawnCalls(item, model) {
   if (typeof args !== "object" || args === null || Array.isArray(args)) return item;
   if (args.model !== undefined && !isSubagentSpawnCall(item)) return item;
   if (args.target?.type === "chatgptWorkCloud") return item;
+
+  // A routed agent_type owns the child model/config. Injecting the parent
+  // session model here would create a contradictory spawn request such as
+  // agent_type=router_chatgpt_web_high with model=chatgpt-web/medium.
+  if (
+    isSubagentSpawnCall(item)
+    && typeof args.agent_type === "string"
+    && args.agent_type
+  ) {
+    return item;
+  }
+
   if (args.model === model) return item;
   return { ...item, arguments: JSON.stringify({ ...args, model }) };
 }

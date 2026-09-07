@@ -133,3 +133,25 @@ test("only registry-proven models receive routed agent definitions", () => {
     ["kimi-oauth/k3"],
   );
 });
+
+test("routed agent definition publishes the model default reasoning effort", () => {
+  const definition = routedAgentDefinition({
+    slug: "chatgpt-web/high",
+    displayName: "ChatGPT Web High",
+    defaultReasoningLevel: "high",
+  });
+
+  assert.match(definition.contents, /model = "chatgpt-web\/high"/);
+  assert.match(definition.contents, /model_reasoning_effort = "high"/);
+});
+
+test("routed agent definition also accepts snake_case default reasoning metadata", () => {
+  const definition = routedAgentDefinition({
+    slug: "chatgpt-web/extra-high",
+    displayName: "ChatGPT Web Extra High",
+    default_reasoning_level: "xhigh",
+  });
+
+  assert.match(definition.contents, /model = "chatgpt-web\/extra-high"/);
+  assert.match(definition.contents, /model_reasoning_effort = "xhigh"/);
+});

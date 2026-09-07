@@ -168,3 +168,24 @@ test("injection is idempotent once the model is present", () => {
   );
   assert.equal(injectSessionModelForSpawnCalls(item, SESSION_MODEL), item);
 });
+
+test("spawn_agent with agent_type does not inherit the parent session model", () => {
+  const item = {
+    type: "function_call",
+    name: "spawn_agent",
+    arguments: JSON.stringify({
+      agent_type: "router_chatgpt_web_high",
+      reasoning_effort: "high",
+      message: "child task",
+    }),
+  };
+
+  const next = injectSessionModelForSpawnCalls(item, SESSION_MODEL);
+
+  assert.equal(next, item);
+  assert.deepEqual(JSON.parse(next.arguments), {
+    agent_type: "router_chatgpt_web_high",
+    reasoning_effort: "high",
+    message: "child task",
+  });
+});
