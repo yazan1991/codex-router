@@ -75,6 +75,14 @@ test("invalid live metadata is rejected without weakening valid records", () => 
   assert.equal(models[0].upstreamId, "example/valid");
 });
 
+test("partial provider metadata never makes discovery fail", () => {
+  const metadata = modelMetadataFromProviderRecord({
+    id: "chatgpt-web/pro",
+    auto_compact_token_limit: 200_000,
+  });
+  assert.deepEqual(metadata, { upstreamId: "chatgpt-web/pro" });
+});
+
 test("discovery keeps model ids when one live capability record is malformed", async () => {
   const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-capability-discovery-"));
   const fixture = path.join(fixtureRoot, "models.json");
