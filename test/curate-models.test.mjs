@@ -151,19 +151,33 @@ test("ChatGPT Web curation keeps the upstream slug and immutable account effort"
   assert.equal(parseEfforts("ultra").defaultEffort, "ultra");
 });
 
-test("ChatGPT Web curation preserves its live Codex catalog metadata", () => {
+test("ChatGPT Web curation accepts the current CGW catalog and preserves its supported metadata", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "curate-chatgpt-web-"));
   const file = path.join(dir, "user-models.json");
   const fixture = path.join(dir, "models.json");
+  const routes = [
+    ["chatgpt-web/light", "ChatGPT Web — Instant", "low"],
+    ["chatgpt-web/medium", "ChatGPT Web — Medium", "medium"],
+    ["chatgpt-web/high", "ChatGPT Web — High", "high"],
+    ["chatgpt-web/extra-high", "ChatGPT Web — Extra High", "xhigh"],
+    ["chatgpt-web/pro", "ChatGPT Web — Pro", "ultra"],
+  ];
   writeFileSync(fixture, JSON.stringify({
-    models: [
-      { slug: "gpt-5.6-sol", display_name: "Native row must stay out" },
-      {
-        slug: "chatgpt-web/pro",
-        display_name: "ChatGPT Web — Pro",
-        context_window: 112_193,
+    object: "list",
+    data: [
+      ...routes.map(([id, displayName, effort], index) => ({
+        id,
+        object: "model",
+        display_name: displayName,
+        description: `CGW account route ${id}`,
+        context_window: 128_000 + index,
+        auto_compact_token_limit: 100_000 + index,
         input_modalities: ["text", "image"],
-      },
+        supported_reasoning_levels: [{ effort, description: displayName }],
+        default_reasoning_level: effort,
+      })),
+      { id: "gpt-6-astra", display_name: "Native row must stay out" },
+      { id: "attacker/arbitrary", display_name: "Arbitrary row must stay out" },
     ],
   }));
   try {
@@ -173,7 +187,7 @@ test("ChatGPT Web curation preserves its live Codex catalog metadata", () => {
         path.join(root, "src", "curate-models.mjs"),
         "chatgpt-web",
         "--models",
-        "chatgpt-web/pro",
+        routes.map(([id]) => id).join(","),
         "--fixture",
         fixture,
         "--no-apply",
@@ -189,14 +203,29 @@ test("ChatGPT Web curation preserves its live Codex catalog metadata", () => {
       },
     );
     assert.equal(result.status, 0, result.stderr);
-    const [model] = JSON.parse(readFileSync(file, "utf8")).models;
-    assert.equal(model.slug, "chatgpt-web/pro");
-    assert.equal(model.upstreamModel, "chatgpt-web/pro");
-    assert.equal(model.displayName, "ChatGPT Web — Pro");
-    assert.equal(model.contextWindow, 112_193);
-    assert.deepEqual(model.inputModalities, ["text", "image"]);
-    assert.deepEqual(model.reasoningLevels, [{ effort: "ultra", description: "Pro reasoning" }]);
-    assert.equal(model.defaultEffort, "ultra");
+    const models = JSON.parse(readFileSync(file, "utf8")).models;
+    assert.deepEqual(models.map((model) => model.upstreamModel), routes.map(([id]) => id));
+    for (const [index, [id, displayName, effort]] of routes.entries()) {
+      const model = models[index];
+      assert.equal(model.slug, id);
+      assert.equal(model.displayName, displayName);
+      assert.equal(model.description, `CGW account route ${id}`);
+      assert.equal(model.contextWindow, 128_000 + index);
+      assert.equal(model.autoCompact, 100_000 + index);
+      assert.deepEqual(model.inputModalities, ["text", "image"]);
+      assert.deepEqual(model.reasoningLevels, [{
+        effort,
+        description: {
+          low: "Quick reasoning",
+          medium: "Balanced reasoning",
+          high: "Deep reasoning",
+          xhigh: "Extended reasoning",
+          ultra: "Pro reasoning",
+        }[effort],
+      }]);
+      assert.equal(model.defaultEffort, effort);
+    }
+    assert.ok(models.every((model) => model.upstreamModel.startsWith("chatgpt-web/")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -8,6 +8,18 @@ const MODALITIES = new Set(["text", "image", "audio", "video", "file"]);
 const MAX_CONTEXT_WINDOW = 16_777_216;
 const MAX_MODEL_ID_LENGTH = 512;
 const MAX_DISPLAY_NAME_LENGTH = 240;
+const MAX_DESCRIPTION_LENGTH = 4_000;
+const EFFORT_ORDER = Object.freeze([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
+const EFFORT_RANK = new Map(EFFORT_ORDER.map((effort, index) => [effort, index]));
 const COST_FIELDS = [
   "input",
   "output",
@@ -22,13 +34,17 @@ const COST_FIELDS = [
 export const MODEL_METADATA_FIELDS = Object.freeze([
   "upstreamId",
   "displayName",
+  "description",
   "contextWindow",
+  "autoCompact",
   "inputModalities",
   "outputModalities",
   "supportsTools",
   "supportsReasoning",
   "supportsVision",
   "supportsSearch",
+  "reasoningEfforts",
+  "defaultEffort",
   "cost",
   "requestProfile",
 ]);
@@ -78,6 +94,30 @@ function normalizeBoolean(value, field) {
   return value;
 }
 
+function normalizeReasoningEfforts(value, field) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${field} must be a non-empty array.`);
+  }
+  const efforts = [...new Set(value.map((entry) => {
+    if (typeof entry === "string") return entry.trim().toLowerCase();
+    if (entry && typeof entry === "object" && typeof entry.effort === "string") {
+      return entry.effort.trim().toLowerCase();
+    }
+    return "";
+  }))];
+  if (efforts.some((effort) => !EFFORT_RANK.has(effort))) {
+    throw new Error(`${field} contains an unsupported reasoning effort.`);
+  }
+  return efforts.sort((left, right) => EFFORT_RANK.get(left) - EFFORT_RANK.get(right));
+}
+
+function normalizeReasoningEffort(value, field) {
+  if (typeof value !== "string" || !EFFORT_RANK.has(value.trim().toLowerCase())) {
+    throw new Error(`${field} must be a supported reasoning effort.`);
+  }
+  return value.trim().toLowerCase();
+}
+
 function normalizeCost(value) {
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -123,11 +163,30 @@ export function normalizeModelMetadata(value, { upstreamId } = {}) {
     }
     result.displayName = value.displayName.trim();
   }
+  if (has(value, "description")) {
+    if (typeof value.description !== "string" || !value.description.trim() || value.description.length > MAX_DESCRIPTION_LENGTH) {
+      throw new Error(`description must be a non-empty string of at most ${MAX_DESCRIPTION_LENGTH} characters.`);
+    }
+    result.description = value.description.trim();
+  }
   if (has(value, "contextWindow")) result.contextWindow = finitePositiveInteger(value.contextWindow, "contextWindow");
+  if (has(value, "autoCompact")) result.autoCompact = finitePositiveInteger(value.autoCompact, "autoCompact");
+  if (result.contextWindow !== undefined && result.autoCompact > result.contextWindow) {
+    throw new Error("autoCompact must not exceed contextWindow.");
+  }
   if (has(value, "inputModalities")) result.inputModalities = normalizeModalities(value.inputModalities, "inputModalities");
   if (has(value, "outputModalities")) result.outputModalities = normalizeModalities(value.outputModalities, "outputModalities");
   for (const field of ["supportsTools", "supportsReasoning", "supportsVision", "supportsSearch"]) {
     if (has(value, field)) result[field] = normalizeBoolean(value[field], field);
+  }
+  if (has(value, "reasoningEfforts")) {
+    result.reasoningEfforts = normalizeReasoningEfforts(value.reasoningEfforts, "reasoningEfforts");
+  }
+  if (has(value, "defaultEffort")) {
+    result.defaultEffort = normalizeReasoningEffort(value.defaultEffort, "defaultEffort");
+    if (result.reasoningEfforts && !result.reasoningEfforts.includes(result.defaultEffort)) {
+      throw new Error("defaultEffort must be one of reasoningEfforts.");
+    }
   }
   if (has(value, "cost")) result.cost = normalizeCost(value.cost);
   if (has(value, "requestProfile")) result.requestProfile = normalizeRequestProfile(value.requestProfile);
@@ -150,6 +209,12 @@ function modalitiesFrom(source, keys) {
   return normalizeModalities(value, keys[0]);
 }
 
+function reasoningEffortsFrom(source, keys) {
+  const value = first(source, keys);
+  if (value === undefined) return undefined;
+  return normalizeReasoningEfforts(value, keys[0]);
+}
+
 /** Convert a provider's OpenAI-compatible `/models` record into canonical metadata. */
 export function modelMetadataFromProviderRecord(record, { trusted = false } = {}) {
   if (!record || typeof record !== "object" || Array.isArray(record)) {
@@ -165,12 +230,23 @@ export function modelMetadataFromProviderRecord(record, { trusted = false } = {}
   const metadata = { upstreamId: upstreamId.trim() };
   const displayName = first(record, ["display_name", "displayName", "name"]);
   if (displayName !== undefined) metadata.displayName = displayName;
+  const description = first(record, ["description"]);
+  if (description !== undefined) metadata.description = description;
 
   const context = first(record, ["context_length", "contextWindow", "context_window", "max_context_window_tokens"])
     ?? first(capabilities, ["context_length", "context_window"])
     ?? first(capabilities.limits || {}, ["max_context_window_tokens"])
     ?? first(record.top_provider || {}, ["context_length"]);
   if (context !== undefined) metadata.contextWindow = typeof context === "string" && /^\d+$/.test(context.trim()) ? Number(context) : context;
+  const autoCompact = first(record, ["auto_compact_token_limit", "autoCompact", "auto_compact"]);
+  if (autoCompact !== undefined && metadata.contextWindow !== undefined) {
+    const parsedAutoCompact = typeof autoCompact === "string" && /^\d+$/.test(autoCompact.trim())
+      ? Number(autoCompact)
+      : autoCompact;
+    if (Number.isInteger(parsedAutoCompact) && parsedAutoCompact >= 1 && parsedAutoCompact <= metadata.contextWindow) {
+      metadata.autoCompact = parsedAutoCompact;
+    }
+  }
 
   const input = modalitiesFrom(record, ["input_modalities", "inputModalities"])
     ?? modalitiesFrom(architecture, ["input_modalities", "inputModalities"]);
@@ -187,6 +263,13 @@ export function modelMetadataFromProviderRecord(record, { trusted = false } = {}
     ?? boolFrom(capabilities, ["supports_reasoning", "supportsReasoning"])
     ?? (typeof capabilities.reasoning === "boolean" ? capabilities.reasoning : undefined);
   if (reasoning !== undefined) metadata.supportsReasoning = reasoning;
+  const reasoningEfforts = reasoningEffortsFrom(record, ["supported_reasoning_levels", "reasoningEfforts"]);
+  if (reasoningEfforts) {
+    metadata.reasoningEfforts = reasoningEfforts;
+    metadata.supportsReasoning = true;
+  }
+  const defaultEffort = first(record, ["default_reasoning_level", "defaultEffort"]);
+  if (defaultEffort !== undefined) metadata.defaultEffort = String(defaultEffort).trim().toLowerCase();
   const vision = boolFrom(record, ["supports_vision", "supportsVision"])
     ?? boolFrom(capabilities, ["supports_vision", "supportsVision"]);
   if (vision !== undefined) metadata.supportsVision = vision;
@@ -223,7 +306,9 @@ export function modelMetadataFromPreset(model) {
   const metadata = {
     upstreamId: model.upstreamId ?? model.upstreamModel,
     ...(model.displayName ? { displayName: model.displayName } : {}),
+    ...(model.description ? { description: model.description } : {}),
     ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
+    ...(model.autoCompact !== undefined ? { autoCompact: model.autoCompact } : {}),
     ...(model.inputModalities ? { inputModalities: model.inputModalities } : {}),
     ...(model.outputModalities ? { outputModalities: model.outputModalities } : {}),
     ...(model.supportsTools !== undefined ? { supportsTools: model.supportsTools } : {}),
@@ -234,6 +319,10 @@ export function modelMetadataFromPreset(model) {
     ...(model.cost !== undefined ? { cost: model.cost } : {}),
     ...(model.requestProfile !== undefined ? { requestProfile: model.requestProfile } : {}),
   };
+  if (Array.isArray(model.reasoningLevels)) {
+    metadata.reasoningEfforts = model.reasoningLevels.map((level) => level?.effort);
+  }
+  if (model.defaultEffort !== undefined) metadata.defaultEffort = model.defaultEffort;
   if (metadata.supportsReasoning === undefined && Array.isArray(model.reasoningLevels)) {
     metadata.supportsReasoning = model.reasoningLevels.length > 0;
   }

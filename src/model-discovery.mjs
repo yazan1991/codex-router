@@ -243,9 +243,11 @@ function sameProviderDiscoveryIdentity(left, right) {
     === providerDiscoveryIdentityFingerprint(right);
 }
 
-function discoveryEndpoint(identity) {
+function discoveryEndpoint(provider, identity) {
   const baseUrl = identity?.baseUrl || identity?.session?.apiServerUrl;
-  return typeof baseUrl === "string" && baseUrl.trim() ? `${baseUrl.replace(/\/+$/, "")}/models` : undefined;
+  if (typeof baseUrl !== "string" || !baseUrl.trim()) return undefined;
+  const suffix = provider?.id === "chatgpt-web" ? "chatgpt-web-models" : "models";
+  return `${baseUrl.replace(/\/+$/, "")}/${suffix}`;
 }
 
 export function providerDiscoveryIdentityFingerprint(identity) {
@@ -275,6 +277,39 @@ function credentialChangedError(provider) {
   return error;
 }
 
+export async function providerCatalogRequest(provider, identity) {
+  const credential = identity?.credential || resolveProviderCredential(provider);
+  if (!credential) throw new Error(credentialStatus(provider).setup);
+  // The same loopback guard the api-forwarder applies: a keyless provider's
+  // placeholder credential passes the check above, so an unguarded override
+  // would send `Bearer local` to whatever host the environment names.
+  let baseUrl = identity?.baseUrl || resolveProviderBaseUrl(provider).baseUrl;
+  let headers = provider.id === "chatgpt-web" || provider.authMode === "anonymous"
+    ? {}
+    : provider.protocol === "anthropic"
+    ? { "x-api-key": credential.value, "anthropic-version": "2023-06-01" }
+    : { Authorization: `Bearer ${credential.value}` };
+  if (provider.authProfile === "github-copilot") {
+    const session = await ensureFreshGitHubCopilotSession(credential.value);
+    if (!process.env[provider.baseUrlEnv]) baseUrl = session.baseUrl;
+    headers = {
+      ...githubCopilotCatalogHeaders(session.token),
+    };
+  }
+  if (isOpenCodeProvider(provider)) {
+    headers["User-Agent"] = `codex-router/${VERSION}`;
+    applyOpenCodeSessionHeaders(headers, {
+      provider,
+      fallback: OPENCODE_SESSION_FALLBACKS.discovery,
+    });
+  }
+  return {
+    endpoint: discoveryEndpoint(provider, { baseUrl }),
+    headers,
+    allowPrivate: Boolean(provider.keyless),
+  };
+}
+
 async function providerPayload(provider, identity) {
   const fixture = option("--fixture");
   if (fixture) {
@@ -297,34 +332,10 @@ async function providerPayload(provider, identity) {
       })),
     };
   }
-  const credential = identity?.credential || resolveProviderCredential(provider);
-  if (!credential) throw new Error(credentialStatus(provider).setup);
-  // The same loopback guard the api-forwarder applies: a keyless provider's
-  // placeholder credential passes the check above, so an unguarded override
-  // would send `Bearer local` to whatever host the environment names.
-  let baseUrl = identity?.baseUrl || resolveProviderBaseUrl(provider).baseUrl;
-  let headers = provider.authMode === "anonymous"
-    ? {}
-    : provider.protocol === "anthropic"
-    ? { "x-api-key": credential.value, "anthropic-version": "2023-06-01" }
-    : { Authorization: `Bearer ${credential.value}` };
-  if (provider.authProfile === "github-copilot") {
-    const session = await ensureFreshGitHubCopilotSession(credential.value);
-    if (!process.env[provider.baseUrlEnv]) baseUrl = session.baseUrl;
-    headers = {
-      ...githubCopilotCatalogHeaders(session.token),
-    };
-  }
-  if (isOpenCodeProvider(provider)) {
-    headers["User-Agent"] = `codex-router/${VERSION}`;
-    applyOpenCodeSessionHeaders(headers, {
-      provider,
-      fallback: OPENCODE_SESSION_FALLBACKS.discovery,
-    });
-  }
-  return fetchUntrustedModelCatalog(`${baseUrl}/models`, {
-    headers,
-    allowPrivate: Boolean(provider.keyless),
+  const request = await providerCatalogRequest(provider, identity);
+  return fetchUntrustedModelCatalog(request.endpoint, {
+    headers: request.headers,
+    allowPrivate: request.allowPrivate,
   });
 }
 
@@ -384,7 +395,11 @@ export async function discoverProviderModels(
       const currentIdentity = await providerDiscoveryIdentity(provider);
       const currentFingerprint = providerDiscoveryIdentityFingerprint(currentIdentity);
       const held = refresh ? undefined : catalog.read(providerId, { scope });
-      if (held?.identityFingerprint === currentFingerprint) {
+      const expectedEndpoint = discoveryEndpoint(provider, currentIdentity);
+      if (
+        held?.identityFingerprint === currentFingerprint &&
+        held?.provenance?.endpoint === expectedEndpoint
+      ) {
         return { cached: held, identity: currentIdentity };
       }
       if (held) catalog.forget([providerId], { scope });
@@ -436,7 +451,7 @@ export async function discoverProviderModels(
           provenance: {
             schema: "codex-router/provider-catalog/v1",
             providerId,
-            endpoint: discoveryEndpoint(identity),
+            endpoint: discoveryEndpoint(provider, identity),
             identityFingerprint: providerDiscoveryIdentityFingerprint(identity),
             ...(scope ? { scope } : {}),
           },
