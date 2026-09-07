@@ -38,6 +38,7 @@ import {
 import {
   applyMultiAgentCapabilities,
   readMultiAgentSettings,
+  codexAgentDefinitionModels,
   subagentEligibleModels,
 } from "./multi-agent-state.mjs";
 import {
@@ -1267,7 +1268,7 @@ export function publishCatalog({ refreshNative = refresh, output = true } = {}) 
     // this, switching it off changes multi_agent_version and nothing else, and
     // the model still answers when it is spawned by name.
     const eligibleAgents = routedCatalog || loginFree
-      ? subagentEligibleModels(routedModels, multiAgentSettings)
+      ? codexAgentDefinitionModels(routedModels, multiAgentSettings)
       : [];
     routedAgents = syncRoutedCodexAgents(eligibleAgents);
     // Removing every definition is how an operator's subagents disappear, and
