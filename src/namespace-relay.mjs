@@ -524,7 +524,11 @@ export function injectSessionModelForSpawnCalls(item, model) {
     && typeof args.agent_type === "string"
     && args.agent_type
   ) {
-    return item;
+    // agent_type selects the routed child role and therefore owns the
+    // child model. Drop any model override, including a stale parent model.
+    if (args.model === undefined) return item;
+    const { model: _ignoredModel, ...roleOwnedArgs } = args;
+    return { ...item, arguments: JSON.stringify(roleOwnedArgs) };
   }
 
   if (args.model === model) return item;

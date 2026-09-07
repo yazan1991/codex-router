@@ -189,3 +189,25 @@ test("spawn_agent with agent_type does not inherit the parent session model", ()
     message: "child task",
   });
 });
+
+test("spawn_agent with agent_type drops a conflicting explicit model", () => {
+  const item = spawnCall(
+    "spawn_agent",
+    "collaboration",
+    JSON.stringify({
+      task_name: "web_v2_child",
+      message: "inspect",
+      agent_type: "router_chatgpt_web_high",
+      model: "chatgpt-web/medium",
+    }),
+  );
+
+  const next = injectSessionModelForSpawnCalls(item, "chatgpt-web/medium");
+
+  assert.notEqual(next, item);
+  assert.deepEqual(JSON.parse(next.arguments), {
+    task_name: "web_v2_child",
+    message: "inspect",
+    agent_type: "router_chatgpt_web_high",
+  });
+});
