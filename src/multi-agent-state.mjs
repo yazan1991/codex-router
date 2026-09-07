@@ -210,11 +210,6 @@ export function applyMultiAgentSettings(models, settings, hidden = new Set()) {
     if (hidden.has(model.slug) || disabled.has(slug)) {
       return { ...model, multiAgentVersion: "v1" };
     }
-    // ChatGPT Web runs collaboration through Compatibility V1.
-    // Never promote these cross-backend routes to encrypted V2 payloads.
-    if (model.provider === "chatgpt-web") {
-      return { ...model, multiAgentVersion: "v1" };
-    }
     if (model.multiAgentVersion === "v2") return model;
     if (mode === "all" || (mode === "selected" && enabled.has(slug))) {
       return { ...model, multiAgentVersion: "v2", subagentSelectedByOperator: true };
