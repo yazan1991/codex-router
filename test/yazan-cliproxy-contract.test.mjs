@@ -12,6 +12,19 @@ const forwarder = fs.readFileSync(
   "utf8",
 );
 
+const router = fs.readFileSync(new URL("../src/router.mjs", import.meta.url), "utf8");
+const relayTransport = fs.readFileSync(
+  new URL("../src/provider-relay-transport.mjs", import.meta.url),
+  "utf8",
+);
+const relaySemantics = fs.readFileSync(
+  new URL("../src/routed-agent-relay.mjs", import.meta.url),
+  "utf8",
+);
+const serviceSources = ["linux", "macos", "windows"].map((platform) =>
+  fs.readFileSync(new URL(`../src/service-${platform}.mjs`, import.meta.url), "utf8")
+);
+
 test("CLIProxy native GPT parity remains narrowly scoped", () => {
   for (const slug of [
     "cliproxy/gpt-5.6-sol",
@@ -71,4 +84,34 @@ test("CLIProxy strips only ChatGPT private message metadata at compatibility bou
     forwarder,
     /provider\.id\s*===\s*"cliproxy"[\s\S]*?stripInternalChatMessageMetadataPassthrough\(payload\)/,
   );
+});
+
+test("Codex++ routed collaboration relay remains opt-in and transport-isolated", () => {
+  assert.match(relayTransport, /CODEX_PLUS_ROUTED_AGENT_RELAY/);
+  assert.match(relayTransport, /if \(!config\.enabled\) return undefined/);
+  assert.match(relayTransport, /providerId !== config\.providerId/);
+  assert.match(relayTransport, /provider\.protocol !== "openai-responses"/);
+  assert.match(relayTransport, /provider\.generic !== true/);
+  assert.match(relayTransport, /requires a loopback API-forwarder base URL/);
+  assert.match(relayTransport, /apiForwarderBaseUrl/);
+  assert.match(relayTransport, /PORTS\.router/);
+  assert.match(router, /ROUTED_AGENT_RELAY_RECURSION/);
+  assert.match(router, /isRoutedAgentRelayRequest\(request\.headers\)/);
+  assert.doesNotMatch(relayTransport, /nativeTarget|nativeRelayContext/);
+
+  assert.match(router, /routedTransport[\s\S]*?: nativeRelayContext\(request\)/);
+  assert.doesNotMatch(
+    router,
+    /relayAgentPayloadOnce\([\s\S]*?catch[\s\S]*?nativeRelayContext\(request\)/,
+  );
+
+  assert.match(relaySemantics, /stream: true/);
+  assert.match(relaySemantics, /store: false/);
+  assert.match(relaySemantics, /relay_external_agent_payload/);
+  assert.doesNotMatch(relaySemantics, /image_generation/);
+
+  for (const service of serviceSources) {
+    assert.match(service, /CODEX_PLUS_ROUTED_AGENT_RELAY/);
+    assert.match(service, /CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL/);
+  }
 });

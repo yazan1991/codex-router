@@ -205,6 +205,41 @@ test("background services preserve only environment credentials referenced by a 
   }
 });
 
+test("background services preserve the explicit routed collaboration relay policy", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-relay-service-"));
+  const environment = {
+    CODEX_PLUS_ROUTED_AGENT_RELAY: "cliproxy",
+    CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL: "cliproxy/gpt-5.6-sol",
+  };
+  try {
+    const launchd = serviceCommand(
+      "service-macos.mjs", "darwin", testRoot, "render", "codex", root, environment,
+    );
+    const systemd = serviceCommand(
+      "service-linux.mjs", "linux", testRoot, "render", "codex", root, environment,
+    );
+    const windows = serviceCommand(
+      "service-windows.mjs", "win32", testRoot, "render", "codex", root, environment,
+    );
+    for (const [name, value] of Object.entries(environment)) {
+      assert.ok(
+        launchd.includes(`<key>${name}</key>\n    <string>${value}</string>`),
+        `launchd did not preserve ${name}`,
+      );
+      assert.ok(
+        systemd.includes(`Environment=${systemdQuoted(`${name}=${value}`)}`),
+        `systemd did not preserve ${name}`,
+      );
+      assert.ok(
+        windows.includes(`set "${name}=${value}"`),
+        `Task Scheduler wrapper did not preserve ${name}`,
+      );
+    }
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 test("background services preserve the installer's proxy environment", () => {
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-service-proxy-"));
   const proxyEnvironment = {

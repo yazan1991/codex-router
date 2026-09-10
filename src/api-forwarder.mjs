@@ -1349,6 +1349,7 @@ async function handleRequest(request, response) {
   // resolve it through the built-in credential path or construct its URL here;
   // either would bypass the confinement #404 established.
   if (normalized.provider.generic === true) {
+    const expectedRelayAuthority = request.headers["x-codex-relay-authority"];
     const { response: upstream, dispatcher } = await requestGenericProvider(
       normalized.provider.id,
       `${route}${requestUrl.search}`,
@@ -1365,6 +1366,7 @@ async function handleRequest(request, response) {
         // A model generation lives as long as its caller. Discovery and the
         // explicit provider test remain separately bounded.
         timeoutMs: 0,
+        ...(expectedRelayAuthority ? { expectedAuthority: expectedRelayAuthority } : {}),
       },
     );
     try {
@@ -1757,6 +1759,9 @@ const server = http.createServer((request, response) => {
   handleRequest(request, response).catch((error) => {
     const status = httpErrorStatus(error);
     const transport = providerTransportError(error);
+    const relayCode = typeof error?.code === "string" && /^ROUTED_AGENT_RELAY_[A-Z_]+$/.test(error.code)
+      ? error.code
+      : undefined;
     // Names and codes only: a forwarder failure can wrap upstream response
     // text in its message, and bodies never belong in the log. The code chain
     // is what distinguishes a dead socket from a refused connect (#171).
@@ -1765,10 +1770,16 @@ const server = http.createServer((request, response) => {
     );
     if (!response.headersSent) {
       writeJson(response, status, {
-        error: transport || {
-          type: "provider_api_proxy_error",
-          message: "The API-provider forwarder could not complete the request.",
-        },
+        error: transport || (relayCode
+          ? {
+              type: relayCode,
+              code: relayCode,
+              message: "The routed collaboration relay could not use the provider transport.",
+            }
+          : {
+              type: "provider_api_proxy_error",
+              message: "The API-provider forwarder could not complete the request.",
+            }),
       });
     } else if (!response.writableEnded) {
       endStreamedResponse(response, {

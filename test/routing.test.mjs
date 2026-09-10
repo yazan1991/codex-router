@@ -22,6 +22,7 @@ import {
   encodeCheckpoint,
   LEGACY_V1_SUMMARY_PREFIX,
 } from "../src/compaction-checkpoint.mjs";
+import { userModelEntry } from "../src/user-models.mjs";
 import { openPort } from "./port-pool.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -1483,6 +1484,7 @@ test("router relays encrypted Codex subagent payloads before external routing", 
     CODEX_ROUTER_PORT: String(routerPort),
     CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_PLUS_ROUTED_AGENT_RELAY: "0",
     CODEX_ROUTER_QUIET: "1",
   });
 
@@ -1592,6 +1594,252 @@ test("router relays encrypted Codex subagent payloads before external routing", 
   } finally {
     await stopChild(router);
     await Promise.all([closeServer(native.server), closeServer(gateway.server)]);
+  }
+});
+
+function writeCliproxyRelayFixture(directory, upstreamPort = 8317) {
+  const providersFile = path.join(directory, "generic-providers.json");
+  const userModelsFile = path.join(directory, "user-models.json");
+  const model = userModelEntry({
+    providerId: "cliproxy",
+    upstreamId: "gpt-5.6-sol",
+    priority: 999,
+  });
+  writeFileSync(providersFile, `${JSON.stringify({
+    version: 1,
+    providers: [{
+      id: "cliproxy",
+      displayName: "CLIProxy",
+      baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+      adapter: "openai-responses",
+      allowPrivate: true,
+      enabled: true,
+    }],
+  })}\n`);
+  writeFileSync(userModelsFile, `${JSON.stringify({ version: 1, models: [model] })}\n`);
+  return { providersFile, userModelsFile, model };
+}
+
+test("opt-in routed collaboration relay uses CLIProxy transport without native identity headers", async () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "routed-agent-relay-"));
+  const fixture = writeCliproxyRelayFixture(testRoot);
+  const encryptedContent = "gAAAAA-routed-relay-payload=";
+  const relayRequests = [];
+  const relay = await mockServer(async (request, response) => {
+    relayRequests.push({ headers: request.headers, body: await bodyJson(request) });
+    const args = JSON.stringify({ payload: "Use the routed collaboration handoff." });
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(
+      `event: response.function_call_arguments.done\ndata: ${JSON.stringify({
+        type: "response.function_call_arguments.done",
+        arguments: args,
+      })}\n\ndata: [DONE]\n\n`,
+    );
+  });
+  let nativeRequests = 0;
+  const native = await mockServer(async (_request, response) => {
+    nativeRequests += 1;
+    json(response, 500, { error: { message: "native relay must not be used" } });
+  });
+  const gatewayRequests = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayRequests.push(await bodyJson(request));
+    json(response, 200, { id: "routed", object: "response", output: [] });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_STATE_DIR: path.join(testRoot, "state"),
+    MODEL_ROUTER_GENERIC_PROVIDERS: fixture.providersFile,
+    MODEL_ROUTER_USER_MODELS: fixture.userModelsFile,
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_API_BASE_URL: `http://127.0.0.1:${relay.port}/v1`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_PLUS_ROUTED_AGENT_RELAY: "cliproxy",
+    CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL: fixture.model.slug,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const payload = {
+    model: "kimi-oauth/k3",
+    stream: false,
+    input: [{
+      type: "agent_message",
+      content: [
+        { type: "input_text", text: "Message Type: NEW_TASK\nPayload:\n" },
+        { type: "encrypted_content", encrypted_content: encryptedContent },
+        { type: "image_generation", id: "preserve-image-state" },
+      ],
+    }],
+  };
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    for (const account of ["native-account-one", "native-account-two"]) {
+      const response = await fetch(`${routerBase(routerPort)}/responses`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer native-${account}`,
+          "ChatGPT-Account-Id": account,
+          "X-Codex-Test": "must-not-leak",
+          "X-OpenAI-Test": "must-not-leak",
+          Originator: "codex_cli_rs",
+          "X-OAI-Attestation": "must-not-leak",
+          "X-Session-Id": "must-not-leak",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(response.status, 200, await response.text());
+    }
+    assert.equal(nativeRequests, 0);
+    assert.equal(relayRequests.length, 1, "routed relay cache did not use provider authority");
+    const request = relayRequests[0];
+    assert.equal(request.headers.authorization, `Bearer ${INTERNAL_KEY}`);
+    for (const header of [
+      "chatgpt-account-id",
+      "x-codex-test",
+      "x-openai-test",
+      "originator",
+      "x-oai-attestation",
+      "x-session-id",
+    ]) {
+      assert.equal(request.headers[header], undefined, `${header} leaked to routed relay`);
+    }
+    assert.equal(request.body.model, fixture.model.gatewayModel);
+    assert.equal(request.body.stream, true);
+    assert.equal(request.body.store, false);
+    assert.equal(request.body.input[0].content[1].encrypted_content, encryptedContent);
+    assert.deepEqual(request.body.input[0].content[2], {
+      type: "image_generation",
+      id: "preserve-image-state",
+    });
+    assert.equal(request.body.tool_choice.name, "relay_external_agent_payload");
+    assert.equal(gatewayRequests.length, 2);
+    assert.equal(gatewayRequests[0].input[0].content.at(-1).text, "Use the routed collaboration handoff.");
+  } finally {
+    await stopChild(router);
+    await Promise.all([
+      closeServer(relay.server),
+      closeServer(native.server),
+      closeServer(gateway.server),
+    ]);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("routed collaboration relay failure never falls back to the native account", async () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "routed-agent-relay-failure-"));
+  const fixture = writeCliproxyRelayFixture(testRoot);
+  let relayRequests = 0;
+  const relay = await mockServer(async (_request, response) => {
+    relayRequests += 1;
+    json(response, 503, { error: { message: "CLIProxy unavailable" } });
+  });
+  let nativeRequests = 0;
+  const native = await mockServer(async (_request, response) => {
+    nativeRequests += 1;
+    json(response, 200, { output: [] });
+  });
+  let gatewayRequests = 0;
+  const gateway = await mockServer(async (_request, response) => {
+    gatewayRequests += 1;
+    json(response, 200, { output: [] });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_STATE_DIR: path.join(testRoot, "state"),
+    MODEL_ROUTER_GENERIC_PROVIDERS: fixture.providersFile,
+    MODEL_ROUTER_USER_MODELS: fixture.userModelsFile,
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_API_BASE_URL: `http://127.0.0.1:${relay.port}/v1`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_PLUS_ROUTED_AGENT_RELAY: "cliproxy",
+    CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL: fixture.model.slug,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer native-session-must-remain-unused",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "kimi-oauth/k3",
+        input: [{
+          type: "agent_message",
+          content: [
+            { type: "input_text", text: "Message Type: MESSAGE\nPayload:\n" },
+            { type: "encrypted_content", encrypted_content: "gAAAAA-routed-failure=" },
+          ],
+        }],
+      }),
+    });
+    assert.equal(response.status, 502);
+    assert.equal(relayRequests, 1);
+    assert.equal(nativeRequests, 0);
+    assert.equal(gatewayRequests, 0);
+  } finally {
+    await stopChild(router);
+    await Promise.all([
+      closeServer(relay.server),
+      closeServer(native.server),
+      closeServer(gateway.server),
+    ]);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("native requests remain native when routed collaboration relay is enabled", async () => {
+  const nativeBodies = [];
+  const native = await mockServer(async (request, response) => {
+    nativeBodies.push(await bodyJson(request));
+    json(response, 200, { id: "native", object: "response", output: [] });
+  });
+  let relayRequests = 0;
+  const relay = await mockServer(async (_request, response) => {
+    relayRequests += 1;
+    json(response, 500, { error: { message: "must not be reached" } });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_API_BASE_URL: `http://127.0.0.1:${relay.port}/v1`,
+    CODEX_PLUS_ROUTED_AGENT_RELAY: "cliproxy",
+    CODEX_ROUTER_QUIET: "1",
+  });
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer native-session",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        input: [{
+          type: "agent_message",
+          content: [
+            { type: "input_text", text: "Message Type: MESSAGE\nPayload:\n" },
+            { type: "encrypted_content", encrypted_content: "gAAAAA-native-stays-native=" },
+          ],
+        }],
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+    assert.equal(relayRequests, 0);
+    assert.equal(nativeBodies.length, 1);
+    assert.equal(
+      nativeBodies[0].input[0].content[1].encrypted_content,
+      "gAAAAA-native-stays-native=",
+    );
+  } finally {
+    await stopChild(router);
+    await Promise.all([closeServer(native.server), closeServer(relay.server)]);
   }
 });
 
@@ -8633,20 +8881,21 @@ test("ordinary child traffic does not mutate a legacy local proven record", asyn
 // every conversation on that model.
 test("a subagent effort reaches child turns and leaves parent turns alone", async () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "subagent-effort-e2e-"));
-  // The state directory has to be in the environment *before* the module is
-  // imported: paths.mjs resolves it once at import time, so importing first
-  // and pointing afterwards writes to the real user config instead.
-  const previousStateDir = process.env.MODEL_ROUTER_STATE_DIR;
-  process.env.MODEL_ROUTER_STATE_DIR = stateDir;
-  try {
-    const { setSubagentEffort } = await import(
-      `../src/multi-agent-state.mjs?e2e=${Date.now()}`
-    );
-    setSubagentEffort("deepseek/deepseek-v4-pro", "max");
-  } finally {
-    if (previousStateDir === undefined) delete process.env.MODEL_ROUTER_STATE_DIR;
-    else process.env.MODEL_ROUTER_STATE_DIR = previousStateDir;
-  }
+  // paths.mjs is already cached by the test module's top-level imports, so a
+  // later MODEL_ROUTER_STATE_DIR change would write to the wrong state path.
+  // Write the isolated settings document directly, just as the child router
+  // will read it from its own process environment.
+  writeFileSync(
+    path.join(stateDir, "multi-agent-settings.json"),
+    `${JSON.stringify({
+      version: 2,
+      mode: "proven",
+      enabled: [],
+      disabled: [],
+      efforts: { "deepseek/deepseek-v4-pro": "max" },
+    })}\n`,
+    { mode: 0o600 },
+  );
 
   const seen = [];
   const gateway = await mockServer(async (request, response) => {

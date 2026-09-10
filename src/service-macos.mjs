@@ -85,6 +85,12 @@ function environmentEntries() {
     CODEX_ROUTER_OAUTH_PORT: String(PORTS.oauth),
     CODEX_ROUTER_PORT: String(PORTS.router),
     CODEX_ROUTER_API_PORT: String(PORTS.api),
+    ...(process.env.CODEX_PLUS_ROUTED_AGENT_RELAY !== undefined
+      ? { CODEX_PLUS_ROUTED_AGENT_RELAY: process.env.CODEX_PLUS_ROUTED_AGENT_RELAY }
+      : {}),
+    ...(process.env.CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL !== undefined
+      ? { CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL: process.env.CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL }
+      : {}),
     ...serviceProxyEnvironment(),
     ...providerApiKeyServiceEnvironment(),
     ...(process.env.CODEX_ROUTER_SOURCE_ROOT
