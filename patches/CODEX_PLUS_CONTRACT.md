@@ -37,6 +37,18 @@ Do not strip or alter:
 - reasoning
 - service tiers
 
+## Patch 3: Routed Collaboration Relay V1
+
+The optional `CODEX_PLUS_ROUTED_AGENT_RELAY=cliproxy` mode sends native-format
+collaboration relay bodies through the configured CLIProxy Responses route and
+the existing API-forwarder transport boundary. It is off by default, keeps the
+native path unchanged, isolates cache authority, forwards no native identity
+headers, rejects Router self-targets, binds dispatch to an immutable provider
+authority snapshot, and never falls back to native after a routed failure.
+
+See `patches/ROUTED_COLLABORATION_RELAY_CONTRACT.md` for the full semantic,
+security, verification, maintenance, and rollback contract.
+
 ## Runtime Boundary
 
 The source fork must not contain production credentials or generated Router state.
