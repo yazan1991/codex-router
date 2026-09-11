@@ -494,16 +494,38 @@ function isSubagentSpawnCall(item) {
   return item.namespace === undefined && item.name === `collaboration${NAMESPACE_DELIMITER}spawn_agent`;
 }
 
-// Inject the session model into local create_thread calls that omitted it and
-// pin every spawn_agent call to the routed parent. A parent not offered by the
-// client then fails closed at tool validation instead of silently crossing a
-// billing boundary.
-// `model` is the routed session's model (route.slug). Returns a rewritten
-// item when a local create_thread carries no explicit model or a spawn_agent
-// model differs from the routed parent; otherwise returns the item untouched.
-export function injectSessionModelForSpawnCalls(item, model) {
+function routedSpawnIdentity(sessionModel) {
+  if (!sessionModel || typeof sessionModel !== "object" || Array.isArray(sessionModel)) {
+    return undefined;
+  }
+  const executionRoute = String(sessionModel.executionRoute || "").trim();
+  const clientSpawnModel = String(sessionModel.clientSpawnModel || "").trim();
+  const agentType = String(sessionModel.agentType || "").trim();
+  if (!executionRoute && !clientSpawnModel && !agentType) return undefined;
+  if (!executionRoute || !clientSpawnModel || !agentType) {
+    const error = new Error(
+      "Routed spawn identity is incomplete; refusing to create a child that could fall back to a native model.",
+    );
+    error.code = "ROUTED_SPAWN_IDENTITY_INVALID";
+    error.status = 502;
+    throw error;
+  }
+  return { executionRoute, clientSpawnModel, agentType };
+}
+
+function executionRouteForSession(sessionModel) {
+  if (typeof sessionModel === "string") return sessionModel.trim();
+  return String(sessionModel?.executionRoute || "").trim();
+}
+
+// Inject the routed session model into local create_thread calls that omitted
+// it. For spawn_agent, preserve the routed execution identity through its
+// router-managed agent_type while emitting only the client-valid compatibility
+// model. Other routed providers retain the existing exact-slug pin.
+export function injectSessionModelForSpawnCalls(item, sessionModel, allowedSpawnModels) {
   if (!isSpawnModelCall(item)) return item;
-  if (typeof model !== "string" || !model) return item;
+  const executionRoute = executionRouteForSession(sessionModel);
+  if (!executionRoute) return item;
   if (typeof item.arguments !== "string") return item;
   if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return item;
   let args;
@@ -515,8 +537,39 @@ export function injectSessionModelForSpawnCalls(item, model) {
   if (typeof args !== "object" || args === null || Array.isArray(args)) return item;
   if (args.model !== undefined && !isSubagentSpawnCall(item)) return item;
   if (args.target?.type === "chatgptWorkCloud") return item;
-  if (args.model === model) return item;
-  return { ...item, arguments: JSON.stringify({ ...args, model }) };
+  const spawnIdentity = isSubagentSpawnCall(item)
+    ? routedSpawnIdentity(sessionModel)
+    : undefined;
+  if (spawnIdentity) {
+    if (
+      !(allowedSpawnModels instanceof Set) ||
+      !allowedSpawnModels.has(spawnIdentity.clientSpawnModel)
+    ) {
+      const error = new Error(
+        `Codex does not offer ${spawnIdentity.clientSpawnModel} to spawn_agent; ` +
+          `refusing native fallback for ${spawnIdentity.executionRoute}.`,
+      );
+      error.code = "ROUTED_SPAWN_MODEL_UNAVAILABLE";
+      error.status = 502;
+      throw error;
+    }
+    if (
+      args.model === spawnIdentity.clientSpawnModel &&
+      args.agent_type === spawnIdentity.agentType
+    ) {
+      return item;
+    }
+    return {
+      ...item,
+      arguments: JSON.stringify({
+        ...args,
+        agent_type: spawnIdentity.agentType,
+        model: spawnIdentity.clientSpawnModel,
+      }),
+    };
+  }
+  if (args.model === executionRoute) return item;
+  return { ...item, arguments: JSON.stringify({ ...args, model: executionRoute }) };
 }
 
 const MAX_JSON_CAPTURE_BYTES = 64 * 1024 * 1024;
@@ -1036,7 +1089,8 @@ export function flattenNamespaceTools(
         );
         names.add(fn.name);
         if (tool.name === "collaboration" && fn.name === "spawn_agent") {
-          schemaStringValues(fn.inputSchema?.properties?.model, spawnAgentModels);
+          const clientSchema = fn.parameters ?? fn.inputSchema;
+          schemaStringValues(clientSchema?.properties?.model, spawnAgentModels);
         }
       }
       if (names.size > 0) {
@@ -2181,7 +2235,11 @@ function rewriteNamespaceFunctionCallItem(
   // exact plain identity, not the app namespace. Do not infer app semantics
   // from the restored spelling after the lookup has already proved otherwise.
   if (!exactPlainProviderIdentity) {
-    rewritten = injectSessionModelForSpawnCalls(rewritten, sessionModel);
+    rewritten = injectSessionModelForSpawnCalls(
+      rewritten,
+      sessionModel,
+      lookups.spawnAgentModels,
+    );
   }
   rewritten = rewriteFunctionCallArguments(rewritten);
   return rewritten === item ? undefined : rewritten;

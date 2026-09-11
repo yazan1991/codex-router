@@ -153,6 +153,7 @@ import {
   subagentEligibility,
   subagentFallbackPlan,
 } from "./subagent-routing.mjs";
+import { routedSubagentModelIdentity } from "./subagent-model-identity.mjs";
 import {
   activityMetadataFromHeaders,
   threadIdFromHeaders,
@@ -3915,11 +3916,15 @@ async function handleResponses(request, response, requestUrl) {
       // child interrupts for both routed and native multi-agent parents (San
       // Francisco uses native GPT).
       if (route || pendingInterrupts.length > 0) {
+        const routedIdentity = route ? routedSubagentModelIdentity(route) : undefined;
+        const sessionModel = route?.provider === "cliproxy"
+          ? routedIdentity || { executionRoute: route.slug }
+          : routedIdentity || (route ? route.slug : undefined);
         transforms.push(
           new NamespaceToolCallTransform(
             flattenedNamespaces,
             contentType,
-            route?.slug,
+            sessionModel,
             // A native stream is attached only for the injection, so it must
             // not pick up the routed-provider rewrites on the way through.
             { pendingInterrupts, injectOnly: !route },

@@ -7,6 +7,30 @@ import {
 } from "../src/namespace-relay.mjs";
 
 const SESSION_MODEL = "opencode-go/deepseek-v4-flash";
+const CLIPROXY_IDENTITIES = [
+  Object.freeze({
+    clientSpawnModel: "gpt-5.6-sol",
+    executionRoute: "cliproxy/gpt-5.6-sol",
+    agentType: "router_cliproxy_gpt_5_6_sol",
+  }),
+  Object.freeze({
+    clientSpawnModel: "gpt-5.6-terra",
+    executionRoute: "cliproxy/gpt-5.6-terra",
+    agentType: "router_cliproxy_gpt_5_6_terra",
+  }),
+  Object.freeze({
+    clientSpawnModel: "gpt-5.6-luna",
+    executionRoute: "cliproxy/gpt-5.6-luna",
+    agentType: "router_cliproxy_gpt_5_6_luna",
+  }),
+];
+const SPAWN_MODELS = new Set([
+  "gpt-6-astra",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+]);
 
 function spawnCall(name, namespace, argumentsText) {
   const item = {
@@ -112,6 +136,52 @@ test("explicit subagent model is pinned to its routed parent", () => {
       model: SESSION_MODEL,
     });
   }
+});
+
+test("reviewed CLIProxy GPT routes emit client-valid models and retain routed bindings", () => {
+  for (const identity of CLIPROXY_IDENTITIES) {
+    for (const args of [
+      { task_name: "review", message: "inspect" },
+      {
+        task_name: "review",
+        message: "inspect",
+        model: identity.executionRoute,
+        agent_type: "default",
+      },
+    ]) {
+      const item = spawnCall(
+        "spawn_agent",
+        "collaboration",
+        JSON.stringify(args),
+      );
+      const next = injectSessionModelForSpawnCalls(item, identity, SPAWN_MODELS);
+      assert.deepEqual(JSON.parse(next.arguments), {
+        task_name: "review",
+        message: "inspect",
+        agent_type: identity.agentType,
+        model: identity.clientSpawnModel,
+      });
+    }
+  }
+});
+
+test("CLIProxy spawn mapping fails closed when the client model is unavailable", () => {
+  const item = spawnCall(
+    "spawn_agent",
+    "collaboration",
+    JSON.stringify({ task_name: "review", message: "inspect" }),
+  );
+  assert.throws(
+    () => injectSessionModelForSpawnCalls(item, CLIPROXY_IDENTITIES[0], new Set(["gpt-5.5"])),
+    (error) => error?.code === "ROUTED_SPAWN_MODEL_UNAVAILABLE",
+  );
+  assert.throws(
+    () => injectSessionModelForSpawnCalls(item, {
+      executionRoute: CLIPROXY_IDENTITIES[0].executionRoute,
+      clientSpawnModel: CLIPROXY_IDENTITIES[0].clientSpawnModel,
+    }, SPAWN_MODELS),
+    (error) => error?.code === "ROUTED_SPAWN_IDENTITY_INVALID",
+  );
 });
 
 test("chatgptWorkCloud create_thread calls omit model", () => {

@@ -926,7 +926,7 @@ function mergeUserModels(base, staticAliases) {
     // Local Ollama/LM Studio entries intentionally declare conservative v1 so
     // they are settled and never spend a cloud compatibility probe. Preserve
     // that denial, but refuse the positive certificate.
-    if (model?.multiAgentVersion === "v2") {
+    if (model?.multiAgentVersion === "v2" || model?.multi_agent_version === "v2") {
       warnings.push(
         `Skipped user model: model ${model?.slug || "<unknown>"} may not declare multiAgentVersion v2`,
       );

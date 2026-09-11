@@ -2482,6 +2482,77 @@ test("response transform pins spawn-agent model overrides to the routed parent",
   });
 });
 
+test("response transform maps a routed CLIProxy GPT parent through its managed agent type", () => {
+  const { namespaces } = flattenNamespaceTools(clientRoutedTools());
+  const lookups = buildNamespaceLookups(namespaces);
+  const executionRoute = "cliproxy/gpt-5.6-sol";
+  const identity = {
+    clientSpawnModel: "gpt-5.6-sol",
+    executionRoute,
+    agentType: "router_cliproxy_gpt_5_6_sol",
+  };
+  for (const argumentsText of [
+    JSON.stringify({ message: "verify" }),
+    JSON.stringify({
+      message: "verify",
+      model: executionRoute,
+      agent_type: "router_cliproxy_gpt_5_6_terra",
+    }),
+  ]) {
+    const rewritten = rewriteNamespaceResponsePayload(
+      {
+        output: [{
+          type: "function_call",
+          name: "collaboration__spawn_agent",
+          arguments: argumentsText,
+        }],
+      },
+      lookups,
+      identity,
+    );
+    assert.deepEqual(JSON.parse(rewritten.output[0].arguments), {
+      message: "verify",
+      agent_type: identity.agentType,
+      model: identity.clientSpawnModel,
+    });
+  }
+});
+
+test("response transform accepts parameters-spelled spawn-agent schemas", () => {
+  const tools = clientRoutedTools().map((tool) => {
+    if (tool.type !== "namespace" || tool.name !== "collaboration") return tool;
+    return {
+      ...tool,
+      tools: tool.tools.map((fn) => {
+        if (fn.name !== "spawn_agent") return fn;
+        const { inputSchema, ...rest } = fn;
+        return { ...rest, parameters: inputSchema };
+      }),
+    };
+  });
+  const { namespaces } = flattenNamespaceTools(tools);
+  const rewritten = rewriteNamespaceResponsePayload(
+    {
+      output: [{
+        type: "function_call",
+        name: "collaboration__spawn_agent",
+        arguments: JSON.stringify({ message: "verify" }),
+      }],
+    },
+    buildNamespaceLookups(namespaces),
+    {
+      clientSpawnModel: "gpt-5.6-sol",
+      executionRoute: "cliproxy/gpt-5.6-sol",
+      agentType: "router_cliproxy_gpt_5_6_sol",
+    },
+  );
+  assert.deepEqual(JSON.parse(rewritten.output[0].arguments), {
+    message: "verify",
+    agent_type: "router_cliproxy_gpt_5_6_sol",
+    model: "gpt-5.6-sol",
+  });
+});
+
 test("stream response keeps an omitted spawn-agent model on its routed parent", async () => {
   const { namespaces } = flattenNamespaceTools(clientRoutedTools());
   const event = {

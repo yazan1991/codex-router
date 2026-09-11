@@ -271,6 +271,10 @@ test("registry merges valid user models and skips collisions", async () => {
       ...userModelEntry({ providerId: "deepseek", upstreamId: "deepseek-self-certified", priority: 112 }),
       multiAgentVersion: "v2",
     },
+    {
+      ...userModelEntry({ providerId: "deepseek", upstreamId: "deepseek-self-certified-snake", priority: 113 }),
+      multi_agent_version: "v2",
+    },
     // Reasoning-summary capability fields must agree. A valid enum on its own
     // must not make the catalog claim summaries for a model that does not
     // explicitly support them.
