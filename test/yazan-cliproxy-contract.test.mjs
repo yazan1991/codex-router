@@ -21,9 +21,26 @@ const relaySemantics = fs.readFileSync(
   new URL("../src/routed-agent-relay.mjs", import.meta.url),
   "utf8",
 );
+const cliProxyProviderDocument = JSON.parse(fs.readFileSync(
+  new URL("../config/cliproxy/cliproxy.json", import.meta.url),
+  "utf8",
+));
 const serviceSources = ["linux", "macos", "windows"].map((platform) =>
   fs.readFileSync(new URL(`../src/service-${platform}.mjs`, import.meta.url), "utf8")
 );
+
+test("CLIProxy remains a checked-in routed provider", () => {
+  const [provider] = cliProxyProviderDocument.providers;
+  assert.equal(cliProxyProviderDocument.version, 1);
+  assert.equal(cliProxyProviderDocument.providers.length, 1);
+  assert.equal(provider.id, "cliproxy");
+  assert.equal(provider.kind, "openai-compatible");
+  assert.equal(provider.protocol, "openai-responses");
+  assert.equal(provider.baseUrl, "https://router.oloru.com/v1");
+  assert.equal(provider.baseUrlEnv, "CLIPROXY_API_BASE_URL");
+  assert.deepEqual(provider.credential.environment, ["CLIPROXY_API_KEY"]);
+  assert.equal(provider.credential.file, "cliproxy-api-key.secret");
+});
 
 test("CLIProxy native GPT parity remains narrowly scoped", () => {
   for (const slug of [
@@ -84,6 +101,7 @@ test("CLIProxy strips only ChatGPT private message metadata at compatibility bou
     forwarder,
     /provider\.id\s*===\s*"cliproxy"[\s\S]*?stripInternalChatMessageMetadataPassthrough\(payload\)/,
   );
+  assert.match(forwarder, /payload\.model = model\.upstreamModel;/);
 });
 
 test("Codex++ routed collaboration relay remains opt-in and transport-isolated", () => {
@@ -91,7 +109,10 @@ test("Codex++ routed collaboration relay remains opt-in and transport-isolated",
   assert.match(relayTransport, /if \(!config\.enabled\) return undefined/);
   assert.match(relayTransport, /providerId !== config\.providerId/);
   assert.match(relayTransport, /provider\.protocol !== "openai-responses"/);
-  assert.match(relayTransport, /provider\.generic !== true/);
+  assert.match(
+    relayTransport,
+    /provider\.generic === true[\s\S]*?readGenericProviderAuthoritySnapshot[\s\S]*?readCheckedInProviderAuthoritySnapshot/,
+  );
   assert.match(relayTransport, /requires a loopback API-forwarder base URL/);
   assert.match(relayTransport, /apiForwarderBaseUrl/);
   assert.match(relayTransport, /PORTS\.router/);

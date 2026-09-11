@@ -1,22 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 const testRoot = mkdtempSync(path.join(os.tmpdir(), "provider-relay-transport-"));
 const stateDir = path.join(testRoot, "state");
-const providersFile = path.join(stateDir, "generic-providers.json");
 const userModelsFile = path.join(stateDir, "user-models.json");
-const credentialStoreFile = path.join(stateDir, "provider-credentials.json");
-const credentialId = "cred_cliproxy_relay_01";
 const providerKey = "CLI_PROXY_PROVIDER_KEY_MUST_NOT_ESCAPE";
 
 mkdirSync(stateDir, { recursive: true });
 process.env.CODEX_ROUTER_STATE_DIR = stateDir;
-process.env.MODEL_ROUTER_GENERIC_PROVIDERS = providersFile;
 process.env.MODEL_ROUTER_USER_MODELS = userModelsFile;
-process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE = credentialStoreFile;
+process.env.CLIPROXY_API_BASE_URL = "http://127.0.0.1:8317/v1";
+process.env.CLIPROXY_API_KEY = providerKey;
 
 const { userModelEntry } = await import("../src/user-models.mjs");
 const model = userModelEntry({
@@ -24,43 +21,31 @@ const model = userModelEntry({
   upstreamId: "gpt-5.6-sol",
   priority: 100,
 });
-writeFileSync(providersFile, `${JSON.stringify({
-  version: 1,
-  providers: [{
-    id: "cliproxy",
-    displayName: "CLIProxy",
-    baseUrl: "http://127.0.0.1:8317/v1",
-    adapter: "openai-responses",
-    headers: { "X-CLIProxy-Route": "chatgpt-team" },
-    credentialRef: credentialId,
-    allowPrivate: true,
-    enabled: true,
-  }],
-})}\n`);
-writeFileSync(userModelsFile, `${JSON.stringify({ version: 1, models: [model] })}\n`);
-
-const { addGenericProviderCredentialReference } = await import(
-  "../src/provider-credential-store.mjs"
-);
-const {
-  genericProviderCredentialPath,
-  writeGenericProviderCredential,
-} = await import("../src/provider-credentials.mjs");
-addGenericProviderCredentialReference({
-  id: credentialId,
+const grokModel = userModelEntry({
   providerId: "cliproxy",
-  kind: "api_key",
+  upstreamId: "grok-4.6",
+  priority: 99,
 });
-writeGenericProviderCredential("cliproxy", providerKey);
+writeFileSync(userModelsFile, `${JSON.stringify({ version: 1, models: [model, grokModel] })}\n`);
 
 const {
   resolveProviderRelayTransport,
   isRoutedAgentRelayRequest,
+  readCheckedInProviderAuthoritySnapshot,
 } = await import("../src/provider-relay-transport.mjs");
-const { resolveGenericProviderTransportSnapshot } = await import(
-  "../src/generic-provider-transport-snapshot.mjs"
-);
+const { MODEL_BY_SLUG, endpointForModel, providerForModel } = await import("../src/model-registry.mjs");
 const { PORTS } = await import("../src/paths.mjs");
+test("routed CLIProxy identities retain bare provider-facing model ids", () => {
+  for (const expected of [model, grokModel]) {
+    const registered = MODEL_BY_SLUG.get(expected.slug);
+    assert.equal(registered.slug, expected.slug);
+    assert.equal(registered.provider, "cliproxy");
+    assert.equal(registered.gatewayModel, expected.gatewayModel);
+    assert.equal(registered.upstreamModel, expected.upstreamModel);
+    assert.equal(registered.upstreamModel.includes("cliproxy/"), false);
+  }
+});
+
 const { relayAgentPayloadOnce } = await import("../src/routed-agent-relay.mjs");
 
 test.after(() => rmSync(testRoot, { recursive: true, force: true }));
@@ -98,7 +83,6 @@ test("relay transport resolves the configured Responses model through the loopba
   assert.match(transport.headers["X-Codex-Relay-Authority"], /^[a-f0-9]{64}$/);
   assert.match(transport.cacheScope, /^routed-relay:/);
   assert.equal(JSON.stringify(transport).includes(providerKey), false);
-  assert.equal(JSON.stringify(transport).includes(credentialId), false);
 });
 
 test("routed relay sends only loopback service auth and the invariant encrypted body", async () => {
@@ -148,7 +132,7 @@ test("routed relay sends only loopback service auth and the invariant encrypted 
   );
 });
 
-test("replacing the credential behind one opaque reference rotates the relay cache authority", () => {
+test("replacing the checked-in provider credential rotates the relay cache authority", () => {
   const options = {
     apiBase: "http://127.0.0.1:4212/v1",
     internalKey: "router-internal-key",
@@ -158,16 +142,19 @@ test("replacing the credential behind one opaque reference rotates the relay cac
     },
   };
   const before = resolveProviderRelayTransport(options).cacheScope;
-  writeGenericProviderCredential("cliproxy", "CLI_PROXY_REPLACEMENT_PROVIDER_KEY");
+  process.env.CLIPROXY_API_KEY = "CLI_PROXY_REPLACEMENT_PROVIDER_KEY";
   const after = resolveProviderRelayTransport(options).cacheScope;
   assert.notEqual(before, after);
   assert.equal(after.includes("CLI_PROXY_REPLACEMENT_PROVIDER_KEY"), false);
 });
 
 test("the API-forwarder dispatch snapshot rejects an authority change before sending", () => {
-  const current = resolveGenericProviderTransportSnapshot("cliproxy");
+  const registeredModel = MODEL_BY_SLUG.get(model.slug);
+  const provider = providerForModel(registeredModel);
+  const endpoint = endpointForModel(registeredModel);
+  const current = readCheckedInProviderAuthoritySnapshot(provider, endpoint);
   assert.throws(
-    () => resolveGenericProviderTransportSnapshot("cliproxy", {
+    () => readCheckedInProviderAuthoritySnapshot(provider, endpoint, undefined, {
       expectedAuthority: `${current.authorityFingerprint.slice(0, -1)}0`,
     }),
     (error) => error?.code === "ROUTED_AGENT_RELAY_AUTHORITY_CHANGED",
@@ -211,7 +198,7 @@ test("transport fails closed for non-loopback forwarding and missing internal au
     }),
     (error) => error?.code === "ROUTED_AGENT_RELAY_AUTH_UNAVAILABLE",
   );
-  unlinkSync(genericProviderCredentialPath("cliproxy"));
+  delete process.env.CLIPROXY_API_KEY;
   assert.throws(
     () => resolveProviderRelayTransport({
       apiBase: "http://127.0.0.1:4212/v1",

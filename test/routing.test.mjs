@@ -1598,26 +1598,14 @@ test("router relays encrypted Codex subagent payloads before external routing", 
 });
 
 function writeCliproxyRelayFixture(directory, upstreamPort = 8317) {
-  const providersFile = path.join(directory, "generic-providers.json");
   const userModelsFile = path.join(directory, "user-models.json");
   const model = userModelEntry({
     providerId: "cliproxy",
     upstreamId: "gpt-5.6-sol",
     priority: 999,
   });
-  writeFileSync(providersFile, `${JSON.stringify({
-    version: 1,
-    providers: [{
-      id: "cliproxy",
-      displayName: "CLIProxy",
-      baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
-      adapter: "openai-responses",
-      allowPrivate: true,
-      enabled: true,
-    }],
-  })}\n`);
   writeFileSync(userModelsFile, `${JSON.stringify({ version: 1, models: [model] })}\n`);
-  return { providersFile, userModelsFile, model };
+  return { userModelsFile, model, upstreamPort };
 }
 
 test("opt-in routed collaboration relay uses CLIProxy transport without native identity headers", async () => {
@@ -1650,8 +1638,9 @@ test("opt-in routed collaboration relay uses CLIProxy transport without native i
   const router = run("router.mjs", {
     CODEX_ROUTER_PORT: String(routerPort),
     CODEX_ROUTER_STATE_DIR: path.join(testRoot, "state"),
-    MODEL_ROUTER_GENERIC_PROVIDERS: fixture.providersFile,
     MODEL_ROUTER_USER_MODELS: fixture.userModelsFile,
+    CLIPROXY_API_BASE_URL: `http://127.0.0.1:${fixture.upstreamPort}/v1`,
+    CLIPROXY_API_KEY: "TEST_CLIPROXY_RELAY_KEY",
     CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
     CODEX_ROUTER_API_BASE_URL: `http://127.0.0.1:${relay.port}/v1`,
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
@@ -1749,8 +1738,9 @@ test("routed collaboration relay failure never falls back to the native account"
   const router = run("router.mjs", {
     CODEX_ROUTER_PORT: String(routerPort),
     CODEX_ROUTER_STATE_DIR: path.join(testRoot, "state"),
-    MODEL_ROUTER_GENERIC_PROVIDERS: fixture.providersFile,
     MODEL_ROUTER_USER_MODELS: fixture.userModelsFile,
+    CLIPROXY_API_BASE_URL: `http://127.0.0.1:${fixture.upstreamPort}/v1`,
+    CLIPROXY_API_KEY: "TEST_CLIPROXY_RELAY_KEY",
     CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
     CODEX_ROUTER_API_BASE_URL: `http://127.0.0.1:${relay.port}/v1`,
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,

@@ -80,6 +80,9 @@ import {
   endpointCapabilityError,
   supportsOpenAIModelEndpoint,
 } from "./openai-endpoint-policy.mjs";
+import {
+  readCheckedInProviderAuthoritySnapshot,
+} from "./provider-relay-transport.mjs";
 
 installStableFetchTransport();
 
@@ -1410,6 +1413,16 @@ async function handleRequest(request, response) {
       },
     });
     return;
+  }
+
+  const expectedRelayAuthority = request.headers["x-codex-relay-authority"];
+  if (expectedRelayAuthority) {
+    readCheckedInProviderAuthoritySnapshot(
+      normalized.provider,
+      normalized.endpoint,
+      credential,
+      { expectedAuthority: expectedRelayAuthority },
+    );
   }
 
   // Command Code's documented API is an entitlement, not a credential: the

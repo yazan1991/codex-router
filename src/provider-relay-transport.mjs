@@ -4,10 +4,12 @@ import {
   MODEL_BY_SLUG,
   endpointForModel,
   providerForModel,
+  resolveProviderBaseUrl,
 } from "./model-registry.mjs";
 import { canonicalProviderId } from "./provider-selection.mjs";
 import { PORTS } from "./paths.mjs";
 import { readGenericProviderAuthoritySnapshot } from "./generic-provider-transport-snapshot.mjs";
+import { resolveProviderCredential } from "./provider-credentials.mjs";
 
 export const ROUTED_AGENT_RELAY_FLAG = "CODEX_PLUS_ROUTED_AGENT_RELAY";
 export const ROUTED_AGENT_RELAY_MODEL_FLAG = "CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL";
@@ -39,6 +41,44 @@ function unavailable(
   error.relayProviderId = safeDiagnostic(providerId);
   error.relayModelSlug = safeDiagnostic(modelSlug);
   return error;
+}
+
+export function readCheckedInProviderAuthoritySnapshot(
+  provider,
+  endpoint = provider,
+  credential = resolveProviderCredential(endpoint),
+  { expectedAuthority } = {},
+) {
+  if (!provider || provider.generic === true || provider.kind !== "openai-compatible") {
+    throw unavailable("Routed collaboration relay requires a checked-in API provider.");
+  }
+  if (!credential?.value) {
+    throw unavailable(
+      `Routed collaboration relay credential is unavailable for ${provider.id}.`,
+      "ROUTED_AGENT_RELAY_AUTH_UNAVAILABLE",
+      { providerId: provider.id },
+    );
+  }
+  const { baseUrl } = resolveProviderBaseUrl(endpoint);
+  const authorityFingerprint = createHash("sha256")
+    .update("checked-in-provider")
+    .update("\0")
+    .update(String(provider.id || ""))
+    .update("\0")
+    .update(String(endpoint?.id || provider.id || ""))
+    .update("\0")
+    .update(String(baseUrl || ""))
+    .update("\0")
+    .update(String(credential.value))
+    .digest("hex");
+  if (expectedAuthority && expectedAuthority !== authorityFingerprint) {
+    throw unavailable(
+      `Provider ${provider.id} transport authority changed; retry the relay.`,
+      "ROUTED_AGENT_RELAY_AUTHORITY_CHANGED",
+      { providerId: provider.id },
+    );
+  }
+  return Object.freeze({ providerId: provider.id, endpoint: baseUrl, authorityFingerprint });
 }
 
 function loopbackUrl(value) {
@@ -138,17 +178,17 @@ export function resolveProviderRelayTransport({
       `Routed collaboration relay model ${config.modelSlug} is not a ${config.providerId} Responses route.`,
     );
   }
-  // Codex++ V1 deliberately targets the operator-defined CLIProxy boundary.
-  // A future checked-in provider must define its credential/pool cache authority
-  // explicitly before it can use decrypted relay results.
-  if (provider.generic !== true || provider.enabled === false) {
+  if (provider.generic === true && provider.enabled === false) {
     throw fail(
-      `Routed collaboration relay provider ${providerId} is unavailable or not operator-defined.`,
+      `Routed collaboration relay provider ${providerId} is unavailable.`,
     );
   }
+  const endpoint = endpointForModel(route);
   let authority;
   try {
-    authority = readGenericProviderAuthoritySnapshot(provider.id);
+    authority = provider.generic === true
+      ? readGenericProviderAuthoritySnapshot(provider.id)
+      : readCheckedInProviderAuthoritySnapshot(provider, endpoint);
   } catch {
     throw fail(
       `Routed collaboration relay credential is unavailable for ${providerId}.`,
@@ -156,7 +196,6 @@ export function resolveProviderRelayTransport({
     );
   }
   if (!authority) throw fail(`Routed collaboration relay credential is unavailable for ${providerId}.`, "ROUTED_AGENT_RELAY_AUTH_UNAVAILABLE");
-  const endpoint = endpointForModel(route);
   const parsedBaseResult = apiForwarderBaseUrl(text(apiBase).replace(/\/+$/, ""));
   if (parsedBaseResult?.recursion) {
     throw fail(
@@ -187,7 +226,7 @@ export function resolveProviderRelayTransport({
       [ROUTED_AGENT_RELAY_AUTHORITY_HEADER]: authority.authorityFingerprint,
     },
     providerId,
-    providerEndpoint: endpoint?.baseUrl || provider.baseUrl,
+    providerEndpoint: authority.endpoint,
     authorityFingerprint: authority.authorityFingerprint,
     modelSlug: route.slug,
     gatewayModel: route.gatewayModel,
