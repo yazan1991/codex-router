@@ -240,6 +240,22 @@ test("background services preserve the explicit routed collaboration relay polic
   }
 });
 
+test("Linux background service preserves the bounded automatic review route", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-auto-review-service-"));
+  const environment = { CODEX_PLUS_AUTO_REVIEW_ROUTE: "cliproxy/gpt-5.6-sol" };
+  try {
+    const systemd = serviceCommand(
+      "service-linux.mjs", "linux", testRoot, "render", "codex", root, environment,
+    );
+    assert.match(
+      systemd,
+      new RegExp(`Environment=${systemdQuoted(`${Object.keys(environment)[0]}=${Object.values(environment)[0]}`)}`),
+    );
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 test("background services preserve the installer's proxy environment", () => {
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-service-proxy-"));
   const proxyEnvironment = {

@@ -7618,6 +7618,150 @@ test("router redirects native background turns to the configured routed model", 
   }
 });
 
+test("automatic Codex review routes through the explicit routed target", async () => {
+  const gatewayRequests = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayRequests.push(await bodyJson(request));
+    json(response, 200, { route: "external" });
+  });
+  const routerPort = await openPort();
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-auto-review-"));
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_STATE_DIR: testRoot,
+    CODEX_PLUS_AUTO_REVIEW_ROUTE: "cliproxy/gpt-5.6-sol",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: "codex-auto-review", input: "review turn" }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(gatewayRequests.at(-1).model, "cliproxy-gpt-5-6-sol");
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("automatic Codex review fails closed when no routed target is configured", async () => {
+  const nativeRequests = [];
+  const native = await mockServer(async (request, response) => {
+    nativeRequests.push(await bodyJson(request));
+    json(response, 200, { route: "native" });
+  });
+  const routerPort = await openPort();
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-auto-review-missing-"));
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: "http://127.0.0.1:9/v1",
+    CODEX_ROUTER_STATE_DIR: testRoot,
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: "codex-auto-review", input: "review turn" }),
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.type, "auto_review_route_unavailable");
+    assert.deepEqual(nativeRequests, []);
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("automatic Codex review fails closed when the routed target is unavailable", async () => {
+  const nativeRequests = [];
+  const native = await mockServer(async (request, response) => {
+    nativeRequests.push(await bodyJson(request));
+    json(response, 200, { route: "native" });
+  });
+  const routerPort = await openPort();
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-auto-review-unavailable-"));
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: "http://127.0.0.1:9/v1",
+    CODEX_ROUTER_STATE_DIR: testRoot,
+    CODEX_PLUS_AUTO_REVIEW_ROUTE: "cliproxy/not-registered",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: "codex-auto-review", input: "review turn" }),
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.type, "auto_review_route_unavailable");
+    assert.deepEqual(nativeRequests, []);
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("explicit native requests remain native when only auto-review routing is configured", async () => {
+  const nativeRequests = [];
+  const native = await mockServer(async (request, response) => {
+    nativeRequests.push(await bodyJson(request));
+    json(response, 200, { route: "native" });
+  });
+  const routerPort = await openPort();
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-auto-review-native-"));
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: "http://127.0.0.1:9/v1",
+    CODEX_ROUTER_STATE_DIR: testRoot,
+    CODEX_PLUS_AUTO_REVIEW_ROUTE: "cliproxy/gpt-5.6-sol",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: "gpt-5.6-luna", input: "explicit native turn" }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(nativeRequests.at(-1).model, "gpt-5.6-luna");
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 test("native redirect falls back to native when the target cannot route", async () => {
   const nativeRequests = [];
   const native = await mockServer(async (request, response) => {

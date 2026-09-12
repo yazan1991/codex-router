@@ -85,6 +85,9 @@ function unit() {
     ...(process.env.CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL !== undefined
       ? { CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL: process.env.CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL }
       : {}),
+    ...(process.env.CODEX_PLUS_AUTO_REVIEW_ROUTE !== undefined
+      ? { CODEX_PLUS_AUTO_REVIEW_ROUTE: process.env.CODEX_PLUS_AUTO_REVIEW_ROUTE }
+      : {}),
     ...serviceProxyEnvironment(),
     ...providerApiKeyServiceEnvironment(),
     ...(process.env.KIMI_CODE_HOME ? { KIMI_CODE_HOME: process.env.KIMI_CODE_HOME } : {}),

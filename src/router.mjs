@@ -254,6 +254,8 @@ const CATALOG_PATH =
 const INTERNAL_KEY =
   process.env.CODEX_ROUTER_INTERNAL_KEY || process.env.KIMI_INTERNAL_KEY;
 const CALLER_KEY = process.env.CODEX_ROUTER_CALLER_KEY;
+const AUTO_REVIEW_MODEL = "codex-auto-review";
+const AUTO_REVIEW_ROUTE = String(process.env.CODEX_PLUS_AUTO_REVIEW_ROUTE || "").trim();
 const QUIET =
   process.env.CODEX_ROUTER_QUIET === "1" || process.env.KIMI_PROXY_QUIET === "1";
 function positiveByteLimit(value, fallback) {
@@ -3428,6 +3430,26 @@ async function handleResponses(request, response, requestUrl) {
     let registeredRoute =
       MODEL_BY_SLUG.get(requestedModel) ??
       MODEL_BY_SLUG.get(readNativeAliases()[requestedModel]);
+    // Codex's automatic review pass uses an internal native slug that is not
+    // part of the published registry. Give that one internal request an
+    // explicit routed target, and fail closed when the operator has not
+    // configured a target or the target is not currently routable. Other
+    // native requests continue through the existing native/background policy.
+    if (requestedModel === AUTO_REVIEW_MODEL) {
+      const reviewRoute = MODEL_BY_SLUG.get(AUTO_REVIEW_ROUTE);
+      if (!reviewRoute || !routeProviderEnabled(reviewRoute.provider)) {
+        writeJson(response, 503, {
+          error: {
+            type: "auto_review_route_unavailable",
+            message: AUTO_REVIEW_ROUTE
+              ? `Configured automatic review route is unavailable: ${AUTO_REVIEW_ROUTE}`
+              : "Automatic review routing is not configured.",
+          },
+        });
+        return;
+      }
+      registeredRoute = reviewRoute;
+    }
     // An unregistered model on this endpoint is native GPT traffic -- Codex's
     // background agent sessions arrive here hardwired to a native slug no
     // matter which model the user picked. With the redirect opted in, send
