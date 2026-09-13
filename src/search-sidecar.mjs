@@ -23,6 +23,7 @@ const MAX_QUERIES = 4;
 const MAX_RESULT_TEXT = 2_000;
 const MAX_PROVIDER_BODY_BYTES = 64 * 1024;
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+const OPERATION_DEADLINE_REASON = Symbol("search-sidecar-operation-deadline");
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g;
 const RAW_CREDENTIAL_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{16,}|\bsk-[A-Za-z0-9_-]{16,}|\bpplx-[A-Za-z0-9]{16,}|\bgh[opusr]_[A-Za-z0-9_]{16,}|\bxox[baprs]-[A-Za-z0-9-]{16,}|\bAIza[0-9A-Za-z_-]{20,})/i;
 const CREDENTIAL_QUERY_KEY = /^(?:api[-_]?key|access[-_]?token|auth(?:orization)?|bearer|credential|key|password|secret|session|signature|token)$/i;
@@ -263,19 +264,14 @@ function writeCache(cache, key, value, now, maxEntries, ttlMs) {
 }
 
 function requestAbortError(signal) {
+  const timedOut = !signal?.aborted || signal.reason === OPERATION_DEADLINE_REASON;
   return new SearchSidecarError(
-    signal?.aborted ? "Search sidecar was cancelled." : "Search sidecar timed out.",
+    timedOut ? "Search sidecar timed out." : "Search sidecar was cancelled.",
     {
-      code: signal?.aborted ? "search_sidecar_cancelled" : "search_sidecar_timeout",
-      status: signal?.aborted ? 499 : 504,
+      code: timedOut ? "search_sidecar_timeout" : "search_sidecar_cancelled",
+      status: timedOut ? 504 : 499,
     },
   );
-}
-
-function boundedSignal(parent, timeoutMs) {
-  if (parent?.aborted) throw requestAbortError(parent);
-  const timeout = AbortSignal.timeout(timeoutMs);
-  return parent ? AbortSignal.any([parent, timeout]) : timeout;
 }
 
 async function boundedSleep(milliseconds, signal) {
@@ -399,99 +395,116 @@ export async function executeSearchSidecar({
 
   const started = now();
   const deadline = started + binding.timeoutMs;
+  if (signal?.aborted) throw requestAbortError(signal);
+  const deadlineController = new AbortController();
+  const operationSignal = signal
+    ? AbortSignal.any([signal, deadlineController.signal])
+    : deadlineController.signal;
+  const deadlineTimer = setTimeout(
+    () => deadlineController.abort(OPERATION_DEADLINE_REASON),
+    Math.max(0, deadline - now()),
+  );
   let attempts = 0;
-  for (; attempts < binding.maxAttempts; attempts += 1) {
-    const remaining = Math.max(0, deadline - now());
-    if (remaining < 1) {
-      const error = requestAbortError(signal);
-      error.telemetry = { cacheHit: false, attempts, durationMs: Math.max(0, now() - started), providerId: provider.id };
-      throw error;
-    }
-    const attemptSignal = boundedSignal(signal, remaining);
-    let dispatcher;
-    try {
-      const result = await boundedPromise(requestProvider(provider.id, "/search", {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query: queries.length === 1 ? queries[0] : queries,
-          max_results: binding.maxResults,
-          max_tokens: Math.min(20_000, binding.maxResults * 2_000),
-          max_tokens_per_page: 2_000,
-        }),
-        signal: attemptSignal,
-        timeoutMs: remaining,
-      }), attemptSignal);
-      dispatcher = result.dispatcher;
-      if (!result.response.ok) {
-        await Promise.resolve(result.response.body?.cancel?.()).catch(() => undefined);
-        const error = new SearchSidecarError(
-          `The search provider returned HTTP ${result.response.status}.`,
-          {
-            code: "search_sidecar_upstream_error",
-            status: 502,
-          },
-        );
-        error.upstreamStatus = result.response.status;
+  try {
+    for (; attempts < binding.maxAttempts; attempts += 1) {
+      if (operationSignal.aborted) {
+        const error = requestAbortError(operationSignal);
+        error.telemetry = { cacheHit: false, attempts, durationMs: Math.max(0, now() - started), providerId: provider.id };
         throw error;
       }
-      const providerPayload = await boundedPromise(readBoundedJson(result.response), attemptSignal);
-      const results = await boundedPromise(
-        normalizeProviderResults(
-          providerPayload,
-          binding.maxResults,
-          (hostname) => boundedPromise(resolveResultHost(hostname), attemptSignal),
-        ),
-        attemptSignal,
-      );
-      const response = codexSearchResponse(queries, results);
-      writeCache(cache, key, response, now, binding.cacheMaxEntries, binding.cacheTtlMs);
-      return {
-        response,
-        telemetry: {
-          cacheHit: false,
-          attempts: attempts + 1,
-          durationMs: Math.max(0, now() - started),
-          providerId: provider.id,
-          results: results.length,
-        },
-      };
-    } catch (error) {
-      const timedOut = attemptSignal.aborted && !signal?.aborted;
-      const cancelled = signal?.aborted;
-      if (timedOut || cancelled) {
-        const bounded = new SearchSidecarError(
-          cancelled ? "Search sidecar was cancelled." : "Search sidecar timed out.",
-          {
-            code: cancelled ? "search_sidecar_cancelled" : "search_sidecar_timeout",
-            status: cancelled ? 499 : 504,
-            cause: error,
-          },
-        );
-        bounded.telemetry = { cacheHit: false, attempts: attempts + 1, durationMs: Math.max(0, now() - started), providerId: provider.id };
-        throw bounded;
+      const remaining = Math.max(0, deadline - now());
+      if (remaining < 1) {
+        deadlineController.abort(OPERATION_DEADLINE_REASON);
+        const error = requestAbortError(operationSignal);
+        error.telemetry = { cacheHit: false, attempts, durationMs: Math.max(0, now() - started), providerId: provider.id };
+        throw error;
       }
-      const upstreamStatus = error?.upstreamStatus;
-      const retryable = RETRYABLE_STATUS.has(upstreamStatus) || !(error instanceof SearchSidecarError);
-      if (!retryable || attempts + 1 >= binding.maxAttempts) {
-        const failure = error instanceof SearchSidecarError
-          ? error
-          : new SearchSidecarError("The search provider request failed.", {
+      let dispatcher;
+      try {
+        const result = await boundedPromise(requestProvider(provider.id, "/search", {
+          method: "POST",
+          headers: { Accept: "application/json", "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: queries.length === 1 ? queries[0] : queries,
+            max_results: binding.maxResults,
+            max_tokens: Math.min(20_000, binding.maxResults * 2_000),
+            max_tokens_per_page: 2_000,
+          }),
+          signal: operationSignal,
+          timeoutMs: remaining,
+        }), operationSignal);
+        dispatcher = result.dispatcher;
+        if (!result.response.ok) {
+          await Promise.resolve(result.response.body?.cancel?.()).catch(() => undefined);
+          const error = new SearchSidecarError(
+            `The search provider returned HTTP ${result.response.status}.`,
+            {
               code: "search_sidecar_upstream_error",
               status: 502,
+            },
+          );
+          error.upstreamStatus = result.response.status;
+          throw error;
+        }
+        const providerPayload = await boundedPromise(readBoundedJson(result.response), operationSignal);
+        const results = await boundedPromise(
+          normalizeProviderResults(
+            providerPayload,
+            binding.maxResults,
+            (hostname) => boundedPromise(resolveResultHost(hostname), operationSignal),
+          ),
+          operationSignal,
+        );
+        const response = codexSearchResponse(queries, results);
+        writeCache(cache, key, response, now, binding.cacheMaxEntries, binding.cacheTtlMs);
+        return {
+          response,
+          telemetry: {
+            cacheHit: false,
+            attempts: attempts + 1,
+            durationMs: Math.max(0, now() - started),
+            providerId: provider.id,
+            results: results.length,
+          },
+        };
+      } catch (error) {
+        if (operationSignal.aborted) {
+          const timedOut = operationSignal.reason === OPERATION_DEADLINE_REASON;
+          const bounded = new SearchSidecarError(
+            timedOut ? "Search sidecar timed out." : "Search sidecar was cancelled.",
+            {
+              code: timedOut ? "search_sidecar_timeout" : "search_sidecar_cancelled",
+              status: timedOut ? 504 : 499,
               cause: error,
-            });
-        failure.telemetry = { cacheHit: false, attempts: attempts + 1, durationMs: Math.max(0, now() - started), providerId: provider.id };
-        throw failure;
+            },
+          );
+          bounded.telemetry = { cacheHit: false, attempts: attempts + 1, durationMs: Math.max(0, now() - started), providerId: provider.id };
+          throw bounded;
+        }
+        const upstreamStatus = error?.upstreamStatus;
+        const retryable = RETRYABLE_STATUS.has(upstreamStatus) || !(error instanceof SearchSidecarError);
+        if (!retryable || attempts + 1 >= binding.maxAttempts) {
+          const failure = error instanceof SearchSidecarError
+            ? error
+            : new SearchSidecarError("The search provider request failed.", {
+                code: "search_sidecar_upstream_error",
+                status: 502,
+                cause: error,
+              });
+          failure.telemetry = { cacheHit: false, attempts: attempts + 1, durationMs: Math.max(0, now() - started), providerId: provider.id };
+          throw failure;
+        }
+        const remainingAfterAttempt = Math.max(0, deadline - now());
+        const delay = Math.min(binding.retryDelayMs * 2 ** attempts, remainingAfterAttempt);
+        await dispatcher?.close?.().catch(() => undefined);
+        dispatcher = undefined;
+        await sleep(delay, operationSignal);
+      } finally {
+        await dispatcher?.close?.().catch(() => undefined);
       }
-      const remainingAfterAttempt = Math.max(0, deadline - now());
-      const delay = Math.min(binding.retryDelayMs * 2 ** attempts, remainingAfterAttempt);
-      await dispatcher?.close?.().catch(() => undefined);
-      dispatcher = undefined;
-      await sleep(delay, boundedSignal(signal, Math.max(1, remainingAfterAttempt)));
-    } finally {
-      await dispatcher?.close?.().catch(() => undefined);
     }
+  } finally {
+    clearTimeout(deadlineTimer);
   }
   throw new SearchSidecarError("Search sidecar request failed.");
 }
