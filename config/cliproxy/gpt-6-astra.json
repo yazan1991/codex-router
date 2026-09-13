@@ -12,22 +12,53 @@
       "priority": 13,
       "defaultEffort": "medium",
       "reasoningLevels": [
-        { "effort": "low", "description": "Faster reasoning" },
-        { "effort": "medium", "description": "Balanced reasoning" },
-        { "effort": "high", "description": "Deep reasoning" },
-        { "effort": "xhigh", "description": "Extended reasoning" },
-        { "effort": "max", "description": "Maximum reasoning depth" }
+        {
+          "effort": "low",
+          "description": "Faster reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balanced reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "Deep reasoning"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extended reasoning"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth"
+        },
+        {
+          "effort": "ultra",
+          "description": "Maximum reasoning with automatic task delegation"
+        }
       ],
       "contextWindow": 1050000,
       "autoCompact": 900000,
-      "inputModalities": ["text", "image"],
+      "inputModalities": [
+        "text",
+        "image"
+      ],
       "supportsReasoningSummaries": true,
       "defaultReasoningSummary": "auto",
       "supportsImageDetailOriginal": true,
-      "searchTool": { "mode": "standalone" },
+      "searchTool": {
+        "mode": "standalone"
+      },
       "behaviorTemplate": "gpt-6-astra",
       "multiAgentVersion": "v2",
-      "compHash": "cliproxy-gpt-6-astra-v2"
+      "compHash": "cliproxy-gpt-6-astra-v2",
+      "serviceTiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed, increased usage"
+        }
+      ]
     }
   ]
 }

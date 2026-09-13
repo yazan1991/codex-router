@@ -7630,7 +7630,7 @@ test("automatic Codex review routes through the explicit routed target", async (
     CODEX_ROUTER_PORT: String(routerPort),
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_STATE_DIR: testRoot,
-    CODEX_PLUS_AUTO_REVIEW_ROUTE: "cliproxy/gpt-5.6-sol",
+    CODEX_PLUS_AUTO_REVIEW_ROUTE: "cliproxy/codex-auto-review",
     CODEX_ROUTER_QUIET: "1",
   });
 
@@ -7645,7 +7645,7 @@ test("automatic Codex review routes through the explicit routed target", async (
       body: JSON.stringify({ model: "codex-auto-review", input: "review turn" }),
     });
     assert.equal(response.status, 200);
-    assert.equal(gatewayRequests.at(-1).model, "cliproxy-gpt-5-6-sol");
+    assert.equal(gatewayRequests.at(-1).model, "cliproxy-codex-auto-review");
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);
@@ -7739,7 +7739,7 @@ test("explicit native requests remain native when only auto-review routing is co
     CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
     CODEX_ROUTER_GATEWAY_BASE_URL: "http://127.0.0.1:9/v1",
     CODEX_ROUTER_STATE_DIR: testRoot,
-    CODEX_PLUS_AUTO_REVIEW_ROUTE: "cliproxy/gpt-5.6-sol",
+    CODEX_PLUS_AUTO_REVIEW_ROUTE: "cliproxy/codex-auto-review",
     CODEX_ROUTER_QUIET: "1",
   });
 

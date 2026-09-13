@@ -240,12 +240,20 @@ test("background services preserve the explicit routed collaboration relay polic
   }
 });
 
-test("Linux background service preserves the bounded automatic review route", () => {
+test("macOS and Linux background services preserve the bounded automatic review route", () => {
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-auto-review-service-"));
-  const environment = { CODEX_PLUS_AUTO_REVIEW_ROUTE: "cliproxy/gpt-5.6-sol" };
+  const environment = { CODEX_PLUS_AUTO_REVIEW_ROUTE: "cliproxy/codex-auto-review" };
   try {
+    const launchd = serviceCommand(
+      "service-macos.mjs", "darwin", testRoot, "render", "codex", root, environment,
+    );
     const systemd = serviceCommand(
       "service-linux.mjs", "linux", testRoot, "render", "codex", root, environment,
+    );
+
+    assert.match(
+      launchd,
+      /<key>CODEX_PLUS_AUTO_REVIEW_ROUTE<\/key>\s*<string>cliproxy\/codex-auto-review<\/string>/,
     );
     assert.match(
       systemd,

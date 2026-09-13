@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "slug": "cliproxy/codex-auto-review",
+      "gatewayModel": "cliproxy-codex-auto-review",
+      "upstreamModel": "codex-auto-review",
+      "provider": "cliproxy",
+      "listed": false,
+      "displayName": "Codex Auto Review (CLIProxy)",
+      "description": "Codex Auto Review through the CLIProxy Responses route.",
+      "priority": 43,
+      "defaultEffort": "medium",
+      "reasoningLevels": [
+        { "effort": "low", "description": "Fast responses with lighter reasoning" },
+        { "effort": "medium", "description": "Balances speed and reasoning depth" },
+        { "effort": "high", "description": "Greater reasoning depth" },
+        { "effort": "xhigh", "description": "Extra high reasoning depth" },
+        { "effort": "max", "description": "Maximum reasoning depth" }
+      ],
+      "contextWindow": 272000,
+      "autoCompact": 240000,
+      "inputModalities": ["text", "image"],
+      "supportsReasoningSummaries": true,
+      "defaultReasoningSummary": "auto",
+      "supportsImageDetailOriginal": true,
+      "behaviorTemplate": "codex-auto-review",
+      "multiAgentVersion": "v1",
+      "compHash": "cliproxy-codex-auto-review-v1"
+    }
+  ]
+}

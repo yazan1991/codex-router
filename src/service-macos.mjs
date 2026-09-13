@@ -91,6 +91,9 @@ function environmentEntries() {
     ...(process.env.CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL !== undefined
       ? { CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL: process.env.CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL }
       : {}),
+    ...(process.env.CODEX_PLUS_AUTO_REVIEW_ROUTE !== undefined
+      ? { CODEX_PLUS_AUTO_REVIEW_ROUTE: process.env.CODEX_PLUS_AUTO_REVIEW_ROUTE }
+      : {}),
     ...serviceProxyEnvironment(),
     ...providerApiKeyServiceEnvironment(),
     ...(process.env.CODEX_ROUTER_SOURCE_ROOT

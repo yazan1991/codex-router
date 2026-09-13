@@ -21,6 +21,7 @@ const ROUTES = [
   ["cliproxy/gpt-5.6-terra", "cliproxy-gpt-5-6-terra", "gpt-5.6-terra"],
   ["cliproxy/gpt-5.6-luna", "cliproxy-gpt-5-6-luna", "gpt-5.6-luna"],
   ["cliproxy/gpt-6-astra", "cliproxy-gpt-6-astra", "gpt-6-astra"],
+  ["cliproxy/codex-auto-review", "cliproxy-codex-auto-review", "codex-auto-review"],
 ];
 
 test("CLIProxy GPT routes are checked in and independent of user overlay state", () => {
@@ -32,8 +33,13 @@ test("CLIProxy GPT routes are checked in and independent of user overlay state",
     assert.equal(providerForModel(route).protocol, "openai-responses");
     assert.equal(route.gatewayModel, gatewayModel);
     assert.equal(route.upstreamModel, upstreamModel);
-    assert.equal(route.multiAgentVersion, "v2");
-    assert.equal(routedSubagentModelIdentity(route)?.executionRoute, slug);
+    if (slug === "cliproxy/codex-auto-review") {
+      assert.equal(route.multiAgentVersion, "v1");
+      assert.equal(routedSubagentModelIdentity(route), undefined);
+    } else {
+      assert.equal(route.multiAgentVersion, "v2");
+      assert.equal(routedSubagentModelIdentity(route)?.executionRoute, slug);
+    }
   }
 });
 
