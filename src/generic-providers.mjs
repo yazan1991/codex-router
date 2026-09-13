@@ -17,10 +17,7 @@ import {
   validateGenericProvider,
   validateGenericProviderHeaders,
 } from "./generic-provider-state.mjs";
-import { providerCatalogIdentityFingerprint } from "./model-catalog-cache.mjs";
 import { PROVIDERS } from "./model-registry.mjs";
-import { readProviderCredentialStore } from "./provider-credential-store.mjs";
-import { resolveGenericProviderCredentialReference } from "./provider-credentials.mjs";
 
 export {
   GENERIC_PROVIDER_ADAPTERS,
@@ -30,6 +27,7 @@ export {
 export { genericProviderConfigured } from "./generic-provider-readiness.mjs";
 import { writePrivateJson } from "./file-security.mjs";
 import { fetchUntrustedModelCatalog } from "./untrusted-model-discovery.mjs";
+import { resolveGenericProviderTransportSnapshot } from "./generic-provider-transport-snapshot.mjs";
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -186,40 +184,16 @@ function safeHeaderEntries(headers) {
   );
 }
 
-function credentialSecret(provider) {
-  if (!provider.credentialRef) return undefined;
-  const entry = readProviderCredentialStore().credentials.find((candidate) => candidate.id === provider.credentialRef);
-  if (!entry || entry.state !== "active") return undefined;
-  if (entry.providerType !== "generic") return undefined;
-  if (entry.providerId !== provider.id) return undefined;
-  if (entry.kind !== "api_key") return undefined;
-  return resolveGenericProviderCredentialReference(provider.id, entry.secretRef)?.value;
-}
-
 /**
  * Capture one credential-bound discovery attempt without exposing its secret.
  * The returned loader closes over the raw headers while callers receive only
  * the redacted descriptor and an installation-keyed identity fingerprint.
  */
 export function genericProviderDiscoverySnapshot(id) {
-  const provider = getGenericProvider(id);
-  if (!provider.enabled) throw new Error(`Generic provider ${provider.id} is disabled.`);
-  const secret = credentialSecret(provider);
-  if (provider.credentialRef && !secret) {
-    throw new Error(`Credential ${provider.credentialRef} is unavailable for generic provider ${provider.id}.`);
-  }
-  const headers = { ...provider.headers };
-  if (secret) headers.Authorization = `Bearer ${secret}`;
-  const headerPairs = Object.entries(headers)
-    .map(([name, value]) => [String(name).toLowerCase(), String(value)])
-    .sort(([left], [right]) => left.localeCompare(right));
-  const identityFingerprint = providerCatalogIdentityFingerprint([
-    "generic",
-    provider.id,
-    provider.baseUrl,
-    provider.adapter,
-    headerPairs,
-  ]);
+  const snapshot = resolveGenericProviderTransportSnapshot(id);
+  const provider = snapshot.provider;
+  const headers = snapshot.headers;
+  const identityFingerprint = snapshot.authorityFingerprint;
   const descriptor = genericProviderDescriptor(provider);
   return Object.freeze({
     descriptor,
@@ -322,10 +296,10 @@ async function boundedResponseBody(response, maxBytes = MAX_RESPONSE_BYTES) {
 export async function requestGenericProvider(
   id,
   requestPath,
-  { fetchImpl = undiciFetch, lookup = lookupHost, timeoutMs = 10_000, ...init } = {},
+  { fetchImpl = undiciFetch, lookup = lookupHost, timeoutMs = 10_000, expectedAuthority, ...init } = {},
 ) {
-  const provider = getGenericProvider(id);
-  if (!provider.enabled) throw unavailable(`Generic provider ${provider.id} is disabled.`);
+  const snapshot = resolveGenericProviderTransportSnapshot(id, { expectedAuthority });
+  const provider = snapshot.provider;
   const endpoint = destinationUrl(provider, requestPath);
   await validateResolvedDestination(endpoint, provider, lookup);
   const requestHeaders = safeHeaderEntries(init.headers);
@@ -333,11 +307,7 @@ export async function requestGenericProvider(
   // add ordinary content-negotiation headers, but cannot replace tenant or
   // gateway selection chosen in the protected provider descriptor.
   const headers = mergeRequestHeaders(requestHeaders, provider.headers);
-  const secret = credentialSecret(provider);
-  if (provider.credentialRef && !secret) {
-    throw unavailable(`The bound credential is unavailable for generic provider ${provider.id}.`);
-  }
-  if (secret) headers.Authorization = `Bearer ${secret}`;
+  if (snapshot.headers.Authorization) headers.Authorization = snapshot.headers.Authorization;
   const useDispatcher = fetchImpl === undiciFetch;
   const dispatcher = useDispatcher ? createDestinationDispatcher(endpoint, provider, timeoutMs) : undefined;
   try {

@@ -189,6 +189,7 @@ import {
   subagentEligibility,
   subagentFallbackPlan,
 } from "./subagent-routing.mjs";
+import { routedSubagentModelIdentity } from "./subagent-model-identity.mjs";
 import {
   activityMetadataFromHeaders,
   threadIdFromHeaders,
@@ -242,6 +243,21 @@ import {
 } from "./fetch-transport.mjs";
 import { grokStreamStallMs, grokTransportIdleTimeoutMs } from "./grok-stream-timeouts.mjs";
 import { handleResponsesWebSocketUpgrade } from "./responses-websocket.mjs";
+import {
+  directResponsesBody,
+  directResponsesHeaders,
+  directResponsesTarget,
+  isDirectResponsesProvider,
+} from "./direct-responses-provider.mjs";
+import {
+  resolveProviderRelayTransport,
+  isRoutedAgentRelayRequest,
+} from "./provider-relay-transport.mjs";
+import {
+  encryptedAgentPayload,
+  isNativeEncryptedToken,
+  relayAgentPayloadOnce,
+} from "./routed-agent-relay.mjs";
 
 installStableFetchTransport();
 
@@ -282,6 +298,8 @@ const CATALOG_PATH =
 const INTERNAL_KEY =
   process.env.CODEX_ROUTER_INTERNAL_KEY || process.env.KIMI_INTERNAL_KEY;
 const CALLER_KEY = process.env.CODEX_ROUTER_CALLER_KEY;
+const AUTO_REVIEW_MODEL = "codex-auto-review";
+const AUTO_REVIEW_ROUTE = String(process.env.CODEX_PLUS_AUTO_REVIEW_ROUTE || "").trim();
 const QUIET =
   process.env.CODEX_ROUTER_QUIET === "1" || process.env.KIMI_PROXY_QUIET === "1";
 function positiveByteLimit(value, fallback) {
@@ -431,7 +449,6 @@ const NATIVE_IMAGE_PATHS = new Set([
   "/v1/images/generations",
 ]);
 const NATIVE_SEARCH_PATHS = new Set(["/alpha/search", "/v1/alpha/search"]);
-const AGENT_PAYLOAD_RELAY_TOOL = "relay_external_agent_payload";
 const configuredAgentPayloadCacheTtlMs = Number(
   process.env.MODEL_ROUTER_AGENT_PAYLOAD_CACHE_TTL_MS ||
     process.env.CODEX_ROUTER_AGENT_PAYLOAD_CACHE_TTL_MS ||
@@ -1528,117 +1545,6 @@ function nativeAgentRelayModel() {
   }
 }
 
-// Every `encrypted_content` value OpenAI issues is a Fernet token: the version
-// byte 0x80 followed by a big-endian timestamp whose leading bytes stay zero
-// for the rest of the century, which base64url-encodes to the fixed `gAAAAA`
-// prefix over the base64url alphabet with no whitespace. This is the whole
-// detection predicate -- the plaintext is never inspected.
-const NATIVE_ENCRYPTED_TOKEN = /^gAAAAA[A-Za-z0-9_-]+={0,2}$/;
-
-function isNativeEncryptedToken(value) {
-  return typeof value === "string" && NATIVE_ENCRYPTED_TOKEN.test(value);
-}
-
-function encryptedAgentPayload(item) {
-  if (!Array.isArray(item?.content)) return undefined;
-  const visibleText = item.content
-    .filter(
-      (part) =>
-        ["input_text", "text"].includes(part?.type) && typeof part.text === "string",
-    )
-    .map((part) => part.text)
-    .join("");
-  if (!/Message Type:\s*(?:NEW_TASK|MESSAGE|FOLLOWUP_TASK|FINAL_ANSWER)\b[\s\S]*\nPayload:\s*$/i.test(visibleText)) {
-    return undefined;
-  }
-  const encrypted = item.content.find(
-    (part) =>
-      part?.type === "encrypted_content" &&
-      typeof part.encrypted_content === "string" &&
-      part.encrypted_content.length > 0,
-  );
-  if (!encrypted) return undefined;
-  return {
-    content: encrypted.encrypted_content,
-    native: isNativeEncryptedToken(encrypted.encrypted_content),
-  };
-}
-
-function parseRelayedAgentPayload(payload) {
-  const output = payload?.item
-    ? [payload.item]
-    : Array.isArray(payload?.output)
-      ? payload.output
-      : Array.isArray(payload?.response?.output)
-        ? payload.response.output
-        : [];
-  const call = output.find(
-    (item) => item?.type === "function_call" && item.name === AGENT_PAYLOAD_RELAY_TOOL,
-  );
-  if (!call) return undefined;
-  return parseRelayedAgentArguments(call.arguments);
-}
-
-function parseRelayedAgentArguments(value) {
-  try {
-    const args = typeof value === "string" ? JSON.parse(value) : value;
-    return typeof args?.payload === "string" ? args.payload : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function parseRelayedAgentPayloadSse(bytes) {
-  const events = bytes.toString("utf8").split(/\r?\n\r?\n/);
-  const relayItems = new Set();
-  let argumentDeltas = "";
-  for (const rawEvent of events) {
-    const data = rawEvent
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trimStart())
-      .join("\n")
-      .trim();
-    if (!data || data === "[DONE]") continue;
-    try {
-      const event = JSON.parse(data);
-      if (
-        event?.type === "response.output_item.added" &&
-        event.item?.type === "function_call" &&
-        event.item.name === AGENT_PAYLOAD_RELAY_TOOL
-      ) {
-        if (event.item.id) relayItems.add(event.item.id);
-        if (event.item.call_id) relayItems.add(event.item.call_id);
-      }
-      const relatedArgumentEvent =
-        relayItems.size === 0 ||
-        relayItems.has(event?.item_id) ||
-        relayItems.has(event?.call_id);
-      if (
-        event?.type === "response.function_call_arguments.delta" &&
-        relatedArgumentEvent &&
-        typeof event.delta === "string"
-      ) {
-        argumentDeltas += event.delta;
-      }
-      if (
-        event?.type === "response.function_call_arguments.done" &&
-        relatedArgumentEvent
-      ) {
-        const completed = parseRelayedAgentArguments(event.arguments);
-        if (completed !== undefined) return completed;
-      }
-      const plaintext = parseRelayedAgentPayload(event);
-      if (plaintext !== undefined) return plaintext;
-    } catch {
-      // Ignore malformed or unrelated events and continue to the completion item.
-    }
-  }
-  const accumulated = parseRelayedAgentArguments(argumentDeltas);
-  if (accumulated !== undefined) return accumulated;
-  return undefined;
-}
-
 function nativeRelayContext(request) {
   const headers = nativeHeaders(request);
   const authorization =
@@ -1652,7 +1558,14 @@ function nativeRelayContext(request) {
     .update("\0")
     .update(account)
     .digest("base64url");
-  return { accountScope, headers };
+  return {
+    cacheScope: `native:${accountScope}`,
+    headers,
+    mode: "native",
+    model: nativeAgentRelayModel(),
+    providerId: "openai",
+    url: nativeTarget("/responses", ""),
+  };
 }
 
 function agentPayloadCacheKey(encrypted, accountScope) {
@@ -1859,7 +1772,6 @@ async function relayEncryptedAgentPayloadOnce(
   rememberAgentPayload(cacheKey, plaintext);
   return plaintext;
 }
-
 function relayWaiterAbortReason(signal) {
   if (signal?.reason instanceof Error) return signal.reason;
   const error = new Error("The relay waiter was aborted.");
@@ -1896,9 +1808,31 @@ function waitForAgentPayloadRelay(pending, signal) {
   });
 }
 
-async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
-  const { accountScope, headers } = nativeRelayContext(request);
-  const key = agentPayloadCacheKey(encrypted, accountScope);
+async function relayEncryptedAgentPayload(request, item, encrypted, signal, route) {
+  let routedTransport;
+  try {
+    routedTransport = resolveProviderRelayTransport({
+      apiBase: API_BASE,
+      internalKey: INTERNAL_KEY,
+    });
+  } catch (error) {
+    if (!QUIET) {
+      console.error(
+        `[codex-router] relay_mode=routed provider=${error?.relayProviderId || "unknown"} ` +
+          `model=${error?.relayModelSlug || "unknown"} ` +
+          `code=${error?.code || "ROUTED_AGENT_RELAY_UNAVAILABLE"}`,
+      );
+    }
+    throw error;
+  }
+  const relay = routedTransport
+    ? {
+        ...routedTransport,
+        mode: "routed",
+        model: routedTransport.gatewayModel,
+      }
+    : nativeRelayContext(request);
+  const key = agentPayloadCacheKey(encrypted, relay.cacheScope);
   const cached = cachedAgentPayload(key);
   if (cached !== undefined) return cached;
   if (agentRelayFailureActive(key)) throw nativeAgentRelayRateLimitError();
@@ -1914,17 +1848,36 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
     settled: false,
     waiters: 0,
   };
-  operation.promise = relayEncryptedAgentPayloadOnce(
+  operation.promise = relayAgentPayloadOnce({
     item,
-    key,
-    headers,
-    controller.signal,
-  ).finally(() => {
-    operation.settled = true;
-    if (agentPayloadCacheInFlight.get(key) === operation) {
-      agentPayloadCacheInFlight.delete(key);
-    }
-  });
+    model: relay.model,
+    url: relay.url,
+    headers: relay.headers,
+    signal: controller.signal,
+    mode: relay.mode,
+  })
+    .then((plaintext) => {
+      rememberAgentPayload(key, plaintext);
+      return plaintext;
+    })
+    .catch((error) => {
+      if (relay.mode === "native" && error?.status === 429) {
+        rememberAgentRelayFailure(key);
+      }
+      if (relay.mode === "routed" && !QUIET) {
+        console.error(
+          `[codex-router] relay_mode=routed provider=${relay.providerId} ` +
+            `model=${relay.modelSlug} code=${error?.code || "ROUTED_AGENT_RELAY_UPSTREAM_ERROR"}`,
+        );
+      }
+      throw error;
+    })
+    .finally(() => {
+      operation.settled = true;
+      if (agentPayloadCacheInFlight.get(key) === operation) {
+        agentPayloadCacheInFlight.delete(key);
+      }
+    });
   // If every waiter disconnects, the shared operation is aborted and may
   // reject after nobody remains to await it. Mark that rejection observed.
   operation.promise.catch(() => {});
@@ -1932,7 +1885,7 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
   return waitForAgentPayloadRelay(operation, signal);
 }
 
-async function normalizeRoutedAgentInput(request, input, signal) {
+async function normalizeRoutedAgentInput(request, input, signal, route) {
   const normalized = normalizeRoutedInput(input);
   if (!Array.isArray(normalized)) return normalized;
   const output = [];
@@ -1943,7 +1896,7 @@ async function normalizeRoutedAgentInput(request, input, signal) {
       continue;
     }
     const plaintext = payload.native
-      ? await relayEncryptedAgentPayload(request, item, payload.content, signal)
+      ? await relayEncryptedAgentPayload(request, item, payload.content, signal, route)
       : payload.content;
     output.push({
       ...item,
@@ -2776,7 +2729,7 @@ async function summarize(request, payload, route, signal, { allowFailover = true
   // inside a `/goal` or subagent session summarizes opaque payloads. The relay
   // is cached by ciphertext, so a conversation whose turns already resolved
   // costs nothing extra here.
-  const normalized = await normalizeRoutedAgentInput(request, originalInput, signal);
+  const normalized = await normalizeRoutedAgentInput(request, originalInput, signal, route);
   const searchContract = routedSearchContract(searchSnapshot, normalized);
   // Evidence is extracted before tool-result aging rewrites old output bytes.
   // The summarizer may select source IDs, but only this deterministic pass can
@@ -3881,6 +3834,26 @@ async function handleResponses(request, response, requestUrl) {
       );
       return;
     }
+    // Codex's automatic review pass uses an internal native slug that is not
+    // part of the published registry. Give that one internal request an
+    // explicit routed target, and fail closed when the operator has not
+    // configured a target or the target is not currently routable. Other
+    // native requests continue through the existing native/background policy.
+    if (requestedModel === AUTO_REVIEW_MODEL) {
+      const reviewRoute = MODEL_BY_SLUG.get(AUTO_REVIEW_ROUTE);
+      if (!reviewRoute || !routeProviderEnabled(reviewRoute.provider)) {
+        writeJson(response, 503, {
+          error: {
+            type: "auto_review_route_unavailable",
+            message: AUTO_REVIEW_ROUTE
+              ? `Configured automatic review route is unavailable: ${AUTO_REVIEW_ROUTE}`
+              : "Automatic review routing is not configured.",
+          },
+        });
+        return;
+      }
+      registeredRoute = reviewRoute;
+    }
     // An unregistered model on this endpoint is native GPT traffic -- Codex's
     // background agent sessions arrive here hardwired to a native slug no
     // matter which model the user picked. With the redirect opted in, send
@@ -4015,6 +3988,7 @@ async function handleResponses(request, response, requestUrl) {
         request,
         payload.input,
         controller.signal,
+        route,
       );
       searchContract = routedSearchContract(searchSnapshot, normalizedInput);
       agingEnabled = toolResultAgingEnabled();
@@ -4430,11 +4404,15 @@ async function handleResponses(request, response, requestUrl) {
       // child interrupts for both routed and native multi-agent parents (San
       // Francisco uses native GPT).
       if (route || pendingInterrupts.length > 0) {
+        const routedIdentity = route ? routedSubagentModelIdentity(route) : undefined;
+        const sessionModel = route?.provider === "cliproxy"
+          ? routedIdentity || { executionRoute: route.slug }
+          : routedIdentity || (route ? route.slug : undefined);
         transforms.push(
           new NamespaceToolCallTransform(
             flattenedNamespaces,
             contentType,
-            route?.slug,
+            sessionModel,
             // A native stream is attached only for the injection, so it must
             // not pick up the routed-provider rewrites on the way through.
             { pendingInterrupts, injectOnly: !route },
@@ -5435,6 +5413,16 @@ async function handleRequest(request, response) {
     request.url || "/",
     `http://${request.headers.host || LISTEN_HOST}`,
   );
+  if (isRoutedAgentRelayRequest(request.headers)) {
+    writeJson(response, 508, {
+      error: {
+        type: "ROUTED_AGENT_RELAY_RECURSION",
+        code: "ROUTED_AGENT_RELAY_RECURSION",
+        message: "Routed collaboration relay target is the Router itself.",
+      },
+    });
+    return;
+  }
   if (request.method === "GET" && requestUrl.pathname === "/health") {
     const health = await healthPayload();
     writeJson(response, health.ok ? 200 : 503, {

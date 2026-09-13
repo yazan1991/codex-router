@@ -52,6 +52,10 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "clinepass/qwen3.7-max",
       "clinepass/qwen3.7-plus",
       "clinepass/qwen3.8-max",
+      "cliproxy/gpt-5.6-luna",
+      "cliproxy/gpt-5.6-sol",
+      "cliproxy/gpt-5.6-terra",
+      "cliproxy/gpt-6-astra",
       "commandcode/deepseek-v4-flash",
       "commandcode/deepseek-v4-pro",
       "commandcode/deepseek-v4.1-flash",
@@ -629,6 +633,10 @@ test("provider registry exposes configured API and OAuth model families", () => 
     "opencode-go/deepseek-v4-flash",
     "xiaomi-mimo/mimo-v2.5",
     "zai-coding/glm-5.3",
+    "cliproxy/gpt-5.6-luna",
+    "cliproxy/gpt-5.6-sol",
+    "cliproxy/gpt-5.6-terra",
+    "cliproxy/gpt-6-astra",
   ]);
   for (const model of MODELS) {
     if (["grok-oauth/grok-4.5", "grok-oauth/grok-4.6"].includes(model.slug) || standaloneSearchSlugs.has(model.slug)) continue;
@@ -642,6 +650,10 @@ test("provider registry exposes configured API and OAuth model families", () => 
   ).map((model) => model.slug);
   assert.deepEqual(originalDetailSlugs.sort(), [
     "anthropic-api/claude-opus-4.8",
+    "cliproxy/gpt-5.6-luna",
+    "cliproxy/gpt-5.6-sol",
+    "cliproxy/gpt-5.6-terra",
+    "cliproxy/gpt-6-astra",
     "deepseek/deepseek-v4-flash-vision-exp",
     "grok-api/grok-4.5",
     "grok-oauth/grok-4.5",
