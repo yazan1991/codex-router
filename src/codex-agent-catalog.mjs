@@ -74,6 +74,26 @@ export function routedAgentDefinition(model) {
   return { agentName, fileName: `${fileStem}.toml`, contents };
 }
 
+// `agent_type` is an indirect model selection surface. Build this map from the
+// same checked-in routes that generated the managed definitions so callers can
+// resolve it before accepting a child route. A collision is deliberately not
+// guessed: an ambiguous managed agent type must be denied by the policy layer.
+export function routedAgentTypeRoutes(models) {
+  const routes = new Map();
+  const ambiguous = new Set();
+  for (const model of models) {
+    const { agentName } = routedAgentDefinition(model);
+    if (ambiguous.has(agentName)) continue;
+    if (routes.has(agentName)) {
+      routes.delete(agentName);
+      ambiguous.add(agentName);
+      continue;
+    }
+    routes.set(agentName, model);
+  }
+  return routes;
+}
+
 // Writes one definition per model, and removes the definitions of models that
 // are no longer passed in. Codex offers every file in the agents directory by
 // name, so a definition left behind keeps a model spawnable through

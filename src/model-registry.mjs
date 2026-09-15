@@ -16,6 +16,7 @@ import {
 } from "./opencode-curation.mjs";
 import { instructionOverlayExists } from "./instruction-overlays.mjs";
 import { SOURCE_ROOT } from "./paths.mjs";
+import { applyReviewedSubagentRouteMetadata } from "./subagent-model-policy.mjs";
 import { officialModelDisplayName, readUserModels } from "./user-models.mjs";
 import { curatableRequestProfile, requestProfileKnown } from "./request-profiles.mjs";
 
@@ -23,6 +24,9 @@ export const REGISTRY_PATH =
   process.env.MODEL_ROUTER_REGISTRY ||
   process.env.CODEX_ROUTER_REGISTRY ||
   path.join(SOURCE_ROOT, "config");
+const REVIEWED_REGISTRY_SOURCE =
+  process.env.MODEL_ROUTER_REGISTRY === undefined &&
+  process.env.CODEX_ROUTER_REGISTRY === undefined;
 
 function fail(message) {
   throw new Error(`Invalid provider registry ${REGISTRY_PATH}: ${message}`);
@@ -588,12 +592,15 @@ function normalizedModel(model, provider, { curated = false } = {}) {
   const presented = modalitiesMissingImage
     ? { ...withRecursion, inputModalities: [...documentedModalities] }
     : withRecursion;
-  if (!provider?.perModelEndpoint) return Object.freeze(presented);
+  const withReviewedSubagentMetadata = applyReviewedSubagentRouteMetadata(presented, {
+    reviewedRegistry: REVIEWED_REGISTRY_SOURCE,
+  });
+  if (!provider?.perModelEndpoint) return Object.freeze(withReviewedSubagentMetadata);
   return Object.freeze({
-    ...presented,
+    ...withReviewedSubagentMetadata,
     endpoint: Object.freeze({
-      ...presented.endpoint,
-      id: presented.slug,
+      ...withReviewedSubagentMetadata.endpoint,
+      id: withReviewedSubagentMetadata.slug,
       kind: "openai-compatible",
     }),
   });
@@ -609,6 +616,9 @@ function modelProblem(model, providers, slugs, gatewayModels) {
     if (typeof model[field] !== "string" || !model[field]) {
       return `model is missing ${field}`;
     }
+  }
+  if (model.subagentFamilyId !== undefined || model.subagentTier !== undefined) {
+    return `model ${model.slug} must not declare Router-owned subagent family metadata`;
   }
   const provider = providers.get(model.provider);
   if (!provider) {

@@ -1,5 +1,7 @@
 import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
+
+import { resolveSubagentChildRoute } from "./subagent-model-policy.mjs";
 import { Transform } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 
@@ -494,16 +496,57 @@ function isSubagentSpawnCall(item) {
   return item.namespace === undefined && item.name === `collaboration${NAMESPACE_DELIMITER}spawn_agent`;
 }
 
+function sessionModelSlug(sessionModel) {
+  if (typeof sessionModel === "string") return sessionModel;
+  return typeof sessionModel?.parentRoute?.slug === "string"
+    ? sessionModel.parentRoute.slug
+    : undefined;
+}
+
+function policyRoutedSpawnCall(item, args, context) {
+  const hasAgentType = Object.hasOwn(args, "agent_type");
+  const agentType = typeof args.agent_type === "string" && args.agent_type
+    ? args.agent_type
+    : undefined;
+  const requestedModel = hasAgentType
+    ? `agent_type:${agentType || "<invalid>"}`
+    : typeof args.model === "string" && args.model
+      ? args.model
+      : undefined;
+  const result = resolveSubagentChildRoute({
+    parentRoute: context.parentRoute,
+    requestedModel,
+    requestedAgentTypeRoute: agentType ? context.agentTypeRoutes?.get(agentType) : undefined,
+    requestedEffort: args.reasoning_effort,
+    policy: context.policy,
+    maxChildTier: context.maxChildTier,
+    routesBySlug: context.routesBySlug,
+    isRouteEligible: context.isRouteEligible,
+  });
+  if (!result.route?.slug) return args;
+  if (result.diagnostic) context.onDiagnostic?.(result.diagnostic);
+  const next = { ...args, model: result.route.slug };
+  if (
+    args.reasoning_effort !== undefined &&
+    !result.route.reasoningLevels?.some((level) => level?.effort === args.reasoning_effort)
+  ) {
+    delete next.reasoning_effort;
+  }
+  // A routed agent_type ultimately selects its TOML model outside this tool
+  // call. Replace it with the policy-resolved canonical direct route so an
+  // unknown or cross-family definition cannot bypass the resolver.
+  if (hasAgentType) delete next.agent_type;
+  return next;
+}
+
 // Inject the session model into local create_thread calls that omitted it and
-// pin every spawn_agent call to the routed parent. A parent not offered by the
-// client then fails closed at tool validation instead of silently crossing a
-// billing boundary.
-// `model` is the routed session's model (route.slug). Returns a rewritten
-// item when a local create_thread carries no explicit model or a spawn_agent
-// model differs from the routed parent; otherwise returns the item untouched.
-export function injectSessionModelForSpawnCalls(item, model) {
+// route every spawn_agent call through the parent session's Router policy. A
+// string session model retains the legacy exact-parent behavior used by older
+// callers; a policy context enables same-family selection for V2 routes.
+export function injectSessionModelForSpawnCalls(item, sessionModel) {
   if (!isSpawnModelCall(item)) return item;
-  if (typeof model !== "string" || !model) return item;
+  const model = sessionModelSlug(sessionModel);
+  if (!model) return item;
   if (typeof item.arguments !== "string") return item;
   if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return item;
   let args;
@@ -515,8 +558,11 @@ export function injectSessionModelForSpawnCalls(item, model) {
   if (typeof args !== "object" || args === null || Array.isArray(args)) return item;
   if (args.model !== undefined && !isSubagentSpawnCall(item)) return item;
   if (args.target?.type === "chatgptWorkCloud") return item;
-  if (args.model === model) return item;
-  return { ...item, arguments: JSON.stringify({ ...args, model }) };
+  const next = isSubagentSpawnCall(item) && sessionModel?.parentRoute
+    ? policyRoutedSpawnCall(item, args, sessionModel)
+    : { ...args, model };
+  const argumentsText = JSON.stringify(next);
+  return argumentsText === item.arguments ? item : { ...item, arguments: argumentsText };
 }
 
 const MAX_JSON_CAPTURE_BYTES = 64 * 1024 * 1024;
@@ -2175,14 +2221,19 @@ function rewriteNamespaceFunctionCallItem(
       };
     }
   }
-  rewritten = sanitizeSpawnAgentModel(rewritten, lookups);
+  const policyContext = isSubagentSpawnCall(rewritten) && sessionModel?.parentRoute;
   // A client may declare an ordinary function whose literal name is
   // `codex_app__create_thread`. Its request-local alias resolves back to that
   // exact plain identity, not the app namespace. Do not infer app semantics
   // from the restored spelling after the lookup has already proved otherwise.
+  if (!policyContext) rewritten = sanitizeSpawnAgentModel(rewritten, lookups);
   if (!exactPlainProviderIdentity) {
     rewritten = injectSessionModelForSpawnCalls(rewritten, sessionModel);
   }
+  // The policy sees the original spelling, then emits only a canonical Router
+  // route or the parent fallback. Do not run that trusted fallback through the
+  // client schema again: a schema that omits the parent must not turn a denial
+  // back into an omitted model selection.
   rewritten = rewriteFunctionCallArguments(rewritten);
   return rewritten === item ? undefined : rewritten;
 }

@@ -84,7 +84,15 @@ function clientRoutedTools() {
             properties: {
               model: {
                 anyOf: [
-                  { type: "string", enum: ["gpt-5.6-sol", "gpt-5.6-terra"] },
+                  {
+                    type: "string",
+                    enum: [
+                      "gpt-5.6-sol",
+                      "gpt-5.6-terra",
+                      "chatgpt-web/medium",
+                      "chatgpt-web/high",
+                    ],
+                  },
                   { type: "null" },
                 ],
               },
@@ -2479,6 +2487,167 @@ test("response transform pins spawn-agent model overrides to the routed parent",
   assert.deepEqual(JSON.parse(allowedButCrossProvider.output[0].arguments), {
     message: "verify",
     model: "opencode-go/deepseek-v4-flash",
+  });
+});
+
+function sameFamilySessionRoutingContext({ maxChildTier = 2, diagnostics = [] } = {}) {
+  const medium = {
+    slug: "chatgpt-web/medium",
+    provider: "chatgpt-web",
+    upstreamModel: "chatgpt-web/medium",
+    multiAgentVersion: "v2",
+    subagentFamilyId: "chatgpt-web/sol",
+    subagentTier: 1,
+    reasoningLevels: [{ effort: "medium" }],
+  };
+  const high = {
+    slug: "chatgpt-web/high",
+    provider: "chatgpt-web",
+    upstreamModel: "chatgpt-web/high",
+    multiAgentVersion: "v2",
+    subagentFamilyId: "chatgpt-web/sol",
+    subagentTier: 2,
+    reasoningLevels: [{ effort: "high" }],
+  };
+  const foreign = {
+    slug: "other/high",
+    provider: "other",
+    upstreamModel: "other/high",
+    multiAgentVersion: "v2",
+    subagentFamilyId: "other/family",
+    subagentTier: 0,
+    reasoningLevels: [{ effort: "high" }],
+  };
+  return {
+    parentRoute: medium,
+    policy: "same-family",
+    maxChildTier,
+    routesBySlug: new Map([
+      [medium.slug, medium],
+      [high.slug, high],
+      ["chatgpt-web/high-alias", high],
+      [foreign.slug, foreign],
+    ]),
+    agentTypeRoutes: new Map([
+      ["router_chatgpt_web_high", high],
+      ["router_other_high", foreign],
+    ]),
+    onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+  };
+}
+
+test("same-family response transform retains an eligible canonical child model and validates its effort", () => {
+  const { namespaces } = flattenNamespaceTools(clientRoutedTools());
+  const context = sameFamilySessionRoutingContext();
+  const rewritten = rewriteNamespaceResponsePayload(
+    {
+      output: [{
+        type: "function_call",
+        name: "collaboration__spawn_agent",
+        arguments: JSON.stringify({
+          message: "verify",
+          model: "chatgpt-web/high-alias",
+          reasoning_effort: "high",
+        }),
+      }],
+    },
+    buildNamespaceLookups(namespaces),
+    context,
+  );
+  assert.deepEqual(JSON.parse(rewritten.output[0].arguments), {
+    message: "verify",
+    model: "chatgpt-web/high",
+    reasoning_effort: "high",
+  });
+});
+
+test("same-family response transform pins denied direct and agent-type child routes to the parent", () => {
+  const { namespaces } = flattenNamespaceTools(clientRoutedTools());
+  const diagnostics = [];
+  const context = sameFamilySessionRoutingContext({ diagnostics });
+  const rewritten = rewriteNamespaceResponsePayload(
+    {
+      output: [
+        {
+          type: "function_call",
+          name: "collaboration__spawn_agent",
+          arguments: JSON.stringify({ message: "direct", model: "other/high" }),
+        },
+        {
+          type: "function_call",
+          name: "collaboration__spawn_agent",
+          arguments: JSON.stringify({ message: "agent", agent_type: "router_other_high" }),
+        },
+      ],
+    },
+    buildNamespaceLookups(namespaces),
+    context,
+  );
+  assert.deepEqual(JSON.parse(rewritten.output[0].arguments), {
+    message: "direct",
+    model: "chatgpt-web/medium",
+  });
+  assert.deepEqual(JSON.parse(rewritten.output[1].arguments), {
+    message: "agent",
+    model: "chatgpt-web/medium",
+  });
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["SUBAGENT_MODEL_FAMILY_DENIED", "SUBAGENT_MODEL_FAMILY_DENIED"],
+  );
+});
+
+test("same-family denial does not carry an effort unsupported by the fallback parent", () => {
+  const { namespaces } = flattenNamespaceTools(clientRoutedTools());
+  const diagnostics = [];
+  const rewritten = rewriteNamespaceResponsePayload(
+    {
+      output: [{
+        type: "function_call",
+        name: "collaboration__spawn_agent",
+        arguments: JSON.stringify({
+          message: "verify",
+          model: "chatgpt-web/high",
+          reasoning_effort: "high",
+        }),
+      }],
+    },
+    buildNamespaceLookups(namespaces),
+    sameFamilySessionRoutingContext({ maxChildTier: 1, diagnostics }),
+  );
+  assert.deepEqual(JSON.parse(rewritten.output[0].arguments), {
+    message: "verify",
+    model: "chatgpt-web/medium",
+  });
+  assert.equal(diagnostics[0].code, "SUBAGENT_MODEL_TIER_DENIED");
+});
+
+test("same-family stream transform resolves agent_type to a canonical direct child without a bypass", async () => {
+  const event = {
+    type: "response.output_item.done",
+    item: {
+      type: "function_call",
+      namespace: "collaboration",
+      name: "spawn_agent",
+      call_id: "call_agent_type",
+      arguments: JSON.stringify({
+        message: "verify",
+        agent_type: "router_chatgpt_web_high",
+        reasoning_effort: "high",
+      }),
+    },
+  };
+  const transform = new NamespaceToolCallTransform(
+    new Map(),
+    "text/event-stream",
+    sameFamilySessionRoutingContext(),
+  );
+  const output = await collect(Readable.from([`data: ${JSON.stringify(event)}\n\n`]).pipe(transform));
+  const payload = JSON.parse(output.toString("utf8").trim().slice(5));
+  assert.deepEqual(JSON.parse(payload.item.arguments), {
+    message: "verify",
+    model: "chatgpt-web/high",
+    reasoning_effort: "high",
   });
 });
 

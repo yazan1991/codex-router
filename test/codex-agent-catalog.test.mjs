@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   routedAgentDefinition,
+  routedAgentTypeRoutes,
   routedCodexAgentStatus,
   syncRoutedCodexAgents,
 } from "../src/codex-agent-catalog.mjs";
@@ -27,6 +28,16 @@ test("routed agent definitions select the router provider and exact model slug",
   assert.match(definition.contents, /Before claiming that something is absent/);
   assert.match(definition.contents, /Never invent or reuse a stale name/);
   assert.match(definition.contents, /Do not stop after merely announcing a next action/);
+});
+
+test("routed agent-type routes resolve only an unambiguous managed agent", () => {
+  const routes = routedAgentTypeRoutes([
+    { slug: "chatgpt-web/high", displayName: "ChatGPT Web High" },
+    { slug: "other/high", displayName: "Other High" },
+  ]);
+  assert.equal(routes.get("router_chatgpt_web_high")?.slug, "chatgpt-web/high");
+  assert.equal(routes.get("router_other_high")?.slug, "other/high");
+  assert.equal(routes.get("reviewer"), undefined);
 });
 
 test("agent sync writes one private definition for every routed model", () => {
