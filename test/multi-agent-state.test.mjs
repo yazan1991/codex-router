@@ -19,12 +19,38 @@ const {
   setMultiAgentMode,
   setMultiAgentModel,
   setMultiAgentModels,
+  replaceMultiAgentState,
+  setSubagentModelPolicy,
   subagentSettingsSnapshot,
 } = await import("../src/multi-agent-state.mjs");
 
 test("subagent settings default to conservative proven mode", () => {
   assert.equal(readAllMultiAgent(), false);
   assert.equal(readMultiAgentSettings().mode, "proven");
+  assert.equal(readMultiAgentSettings().subagent_model_policy, "inherit");
+});
+
+test("same-family policy and child-tier ceiling round-trip through protected state", () => {
+  setSubagentModelPolicy("same-family", 2);
+  assert.equal(readMultiAgentSettings().subagent_model_policy, "same-family");
+  assert.equal(readMultiAgentSettings().max_child_tier, 2);
+  assert.throws(() => setSubagentModelPolicy("unrestricted"), /Unknown subagent model policy/);
+  assert.throws(() => setSubagentModelPolicy("same-family", -1), /max_child_tier/);
+  setSubagentModelPolicy("inherit");
+  assert.equal(readMultiAgentSettings().subagent_model_policy, "inherit");
+  assert.equal(readMultiAgentSettings().max_child_tier, undefined);
+});
+
+test("model controls and full-state replacement preserve same-family policy", () => {
+  setSubagentModelPolicy("same-family", 3);
+  setMultiAgentModels(["chatgpt-web/high"], true);
+  assert.equal(readMultiAgentSettings().subagent_model_policy, "same-family");
+  assert.equal(readMultiAgentSettings().max_child_tier, 3);
+  replaceMultiAgentState({ mode: "selected", enabled: ["chatgpt-web/high"], disabled: [] });
+  assert.equal(readMultiAgentSettings().subagent_model_policy, "same-family");
+  assert.equal(readMultiAgentSettings().max_child_tier, 3);
+  setSubagentModelPolicy("inherit");
+  replaceMultiAgentState({ mode: "proven", enabled: [], disabled: [] });
 });
 
 test("subagent mode round-trips through protected state", () => {

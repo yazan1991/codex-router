@@ -1,5 +1,7 @@
 import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
+
+import { resolveSubagentChildRoute } from "./subagent-model-policy.mjs";
 import { Transform } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 
@@ -8,7 +10,6 @@ import { HeaderlessSseDetector } from "./sse-prefix.mjs";
 import { coerceFunctionCallArguments } from "./tool-arguments.mjs";
 import {
   inlineForeignRefs,
-  declareSchemaTypes,
   nonRecursiveToolSchema,
   providerToolSchema,
 } from "./tool-schema-root.mjs";
@@ -56,11 +57,6 @@ const MCP_NAMESPACE_PREFIX = "mcp__";
 const SPAWN_AGENT_MODELS = new WeakMap();
 const TOOL_SEARCH_RELAYS = new WeakMap();
 const CUSTOM_TOOL_RELAYS = new WeakMap();
-const CUSTOM_TOOL_CODECS = new WeakMap();
-const FUNCTION_RELAYS = new WeakMap();
-// Flattened custom definitions retain the exact native identity beside the
-// object. A literal plain name containing `__` must never acquire a namespace.
-const CUSTOM_TOOL_IDENTITIES = new WeakMap();
 const NAME_ALIASES = new WeakMap();
 const PLAIN_TOOL_NAMES = new WeakMap();
 // A provider-facing function reference can retain the same spelling as a
@@ -289,7 +285,7 @@ export function bridgeCustomTools(
   namespaces,
   toolChoice,
   names = ["apply_patch"],
-  { maxNameLength, bridgeAll = false, codecs } = {},
+  { maxNameLength, bridgeAll = false } = {},
 ) {
   if (!(namespaces instanceof Map)) {
     return { tools, input, toolChoice, bridged: false };
@@ -299,117 +295,65 @@ export function bridgeCustomTools(
   }
   const requested = new Set(names);
   const shouldBridge = (name) => bridgeAll || requested.has(name);
-  // Stored custom calls may use the client's already-flat spelling. Resolve
-  // only exact live definitions, before registering history or forced choices,
-  // so they share the declaration's identity and bounded provider alias.
-  const customWireIdentities = new Map();
-  const otherWireNames = new Set();
-  for (const tool of Array.isArray(tools) ? tools : []) {
-    const native = CUSTOM_TOOL_IDENTITIES.get(tool);
-    if (native) {
-      const wireName = `${native.namespace}${NAMESPACE_DELIMITER}${native.name}`;
-      const previous = customWireIdentities.get(wireName);
-      customWireIdentities.set(wireName,
-        !customWireIdentities.has(wireName) ||
-        (previous?.namespace === native.namespace && previous?.name === native.name)
-          ? native : undefined);
-    } else {
-      const name = providerFunctionName(tool);
-      const original = NAME_ALIASES.get(namespaces)?.providerToNative.get(name);
-      otherWireNames.add(original?.namespace === undefined ? original?.name ?? name
-        : `${original.namespace}${NAMESPACE_DELIMITER}${original.name}`);
-    }
-  }
-  const identityOf = (reference) => CUSTOM_TOOL_IDENTITIES.get(reference) ||
-    (reference.namespace === undefined && !otherWireNames.has(reference.name)
-      ? customWireIdentities.get(reference.name) : undefined) || {
-    name: reference.name,
-    ...(typeof reference.namespace === "string" && reference.namespace
-      ? { namespace: reference.namespace } : {}),
-  };
-  const keyOf = (reference) => {
-    const native = identityOf(reference);
-    return nativeToolKey(native.namespace, native.name);
-  };
-  const nativeTools = new Map();
-  const remember = (reference) => {
-    const native = identityOf(reference);
-    if (typeof native.name !== "string" || !native.name) return;
-    const wireName = CUSTOM_TOOL_IDENTITIES.has(reference) ? reference.name
-      : native.namespace === undefined ? native.name
-        : providerNameForNative(namespaces, native.namespace, native.name);
-    if (shouldBridge(reference.name) || shouldBridge(wireName)) {
-      nativeTools.set(keyOf(reference), { native, wireName });
+  const nativeNames = [];
+  const remember = (name) => {
+    if (
+      typeof name === "string" &&
+      name &&
+      shouldBridge(name) &&
+      !nativeNames.includes(name)
+    ) {
+      nativeNames.push(name);
     }
   };
   if (Array.isArray(tools)) {
-    for (const tool of tools) if (tool?.type === "custom") remember(tool);
+    for (const tool of tools) if (tool?.type === "custom") remember(tool.name);
   }
   if (Array.isArray(input)) {
-    for (const item of input) if (item?.type === "custom_tool_call") remember(item);
+    for (const item of input) if (item?.type === "custom_tool_call") remember(item.name);
   }
-  if (toolChoice?.type === "custom") remember(toolChoice);
+  if (toolChoice?.type === "custom") remember(toolChoice.name);
   if (toolChoice?.type === "allowed_tools" && Array.isArray(toolChoice.tools)) {
     for (const choice of toolChoice.tools) {
-      if (choice?.type === "custom") remember(choice);
+      if (choice?.type === "custom") remember(choice.name);
     }
   }
-  if (!nativeTools.size) return { tools, input, toolChoice, bridged: false };
-
-  // Console Go validates optional item ids on function-shaped history against
-  // the `fc` prefix. The rewrite used to keep `ctc_` / `ctco_` ids on the new
-  // type, which 400s every follow-up after apply_patch (#780). call_id still
-  // pairs the call with its result. A native-minted `fc…` id is kept.
-  const withoutIncompatibleFunctionItemId = (item) => {
-    if (typeof item?.id !== "string" || item.id.startsWith("fc")) return item;
-    const { id: _id, ...rest } = item;
-    return rest;
-  };
+  if (!nativeNames.length) return { tools, input, toolChoice, bridged: false };
 
   const ordinaryTools = Array.isArray(tools)
-    ? tools.filter((tool) => !(tool?.type === "custom" && nativeTools.has(keyOf(tool))))
+    ? tools.filter((tool) => !(tool?.type === "custom" && shouldBridge(tool.name)))
     : tools;
   const visibleNames = providerVisibleToolNames(ordinaryTools);
   const nativeToProvider = new Map();
   const providerToNative = new Map();
-  const providerCodecs = new Map();
-  for (const [identity, { native, wireName }] of nativeTools) {
-    const availableName = availableCustomToolName(wireName, visibleNames);
+  for (const nativeName of nativeNames) {
+    const availableName = availableCustomToolName(nativeName, visibleNames);
     const providerName = Number.isInteger(maxNameLength)
       ? reserveSpecialProviderName(
           namespaces,
-          native.namespace === undefined ? `custom:${native.name}` : `custom:${identity}`,
+          `custom:${nativeName}`,
           availableName,
         )
       : availableName;
     visibleNames.add(providerName);
-    nativeToProvider.set(identity, providerName);
-    providerToNative.set(providerName, native.namespace === undefined ? native.name : native);
-    // History/forced choice alone never grants a codec-backed tool. It must
-    // be a plain native custom tool declared in this exact client request.
-    if (
-      native.namespace === undefined &&
-      codecs instanceof Map && codecs.has(native.name) &&
-      tools?.some((tool) => tool?.type === "custom" && keyOf(tool) === identity)
-    ) providerCodecs.set(providerName, codecs.get(native.name));
+    nativeToProvider.set(nativeName, providerName);
+    providerToNative.set(providerName, nativeName);
   }
   CUSTOM_TOOL_RELAYS.set(namespaces, providerToNative);
-  CUSTOM_TOOL_CODECS.set(namespaces, providerCodecs);
 
   let changedTools = false;
   const routedTools = Array.isArray(tools)
     ? tools.map((tool) => {
         const providerName =
-          tool?.type === "custom" ? nativeToProvider.get(keyOf(tool)) : undefined;
+          tool?.type === "custom" ? nativeToProvider.get(tool.name) : undefined;
         if (!providerName) return tool;
         changedTools = true;
-        const codec = providerCodecs.get(providerName);
-        const description = codec ? codec.description(tool.description) : bridgedCustomToolDescription(tool);
+        const description = bridgedCustomToolDescription(tool);
         return {
           type: "function",
           name: providerName,
           ...(description ? { description } : {}),
-          parameters: codec?.parameters ?? {
+          parameters: {
             type: "object",
             properties: {
               [CUSTOM_TOOL_INPUT_PROPERTY]: {
@@ -426,20 +370,18 @@ export function bridgeCustomTools(
 
   let routedToolChoice = toolChoice;
   const providerChoiceName =
-    toolChoice?.type === "custom" ? nativeToProvider.get(keyOf(toolChoice)) : undefined;
+    toolChoice?.type === "custom" ? nativeToProvider.get(toolChoice.name) : undefined;
   if (providerChoiceName) {
-    const { namespace: _namespace, ...rest } = toolChoice;
-    routedToolChoice = { ...rest, type: "function", name: providerChoiceName };
+    routedToolChoice = { ...toolChoice, type: "function", name: providerChoiceName };
     SPECIAL_FUNCTION_REFERENCES.add(routedToolChoice);
   } else if (toolChoice?.type === "allowed_tools" && Array.isArray(toolChoice.tools)) {
     let changed = false;
     const choices = toolChoice.tools.map((choice) => {
       const providerName =
-        choice?.type === "custom" ? nativeToProvider.get(keyOf(choice)) : undefined;
+        choice?.type === "custom" ? nativeToProvider.get(choice.name) : undefined;
       if (!providerName) return choice;
       changed = true;
-      const { namespace: _namespace, ...rest } = choice;
-      const routedChoice = { ...rest, type: "function", name: providerName };
+      const routedChoice = { ...choice, type: "function", name: providerName };
       SPECIAL_FUNCTION_REFERENCES.add(routedChoice);
       return routedChoice;
     });
@@ -459,27 +401,19 @@ export function bridgeCustomTools(
   let changedInput = false;
   const routedInput = input.map((item) => {
     const providerName =
-      item?.type === "custom_tool_call" ? nativeToProvider.get(keyOf(item)) : undefined;
+      item?.type === "custom_tool_call" ? nativeToProvider.get(item.name) : undefined;
     if (providerName && typeof item.input === "string") {
-      const { type: _type, input: customInput, name: _name, namespace: _namespace, ...rest } = item;
+      const { type: _type, input: customInput, name: _name, ...rest } = item;
       if (typeof item.call_id === "string" && item.call_id) {
         bridgedCallIds.add(item.call_id);
       }
       changedInput = true;
-      // A negotiated client adapter may carry its original provider argument
-      // string inside native input. Restore it verbatim, including failed JSON.
-      // History conversion does not register an executable response codec.
-      // Codecs are registered for plain native names only; a namespaced tool
-      // with the same bare name keeps the ordinary history envelope.
-      const historicalArguments = item.namespace === undefined
-        ? codecs?.get(item.name)?.encodeHistoryInput?.(customInput)
-        : undefined;
-      const routedCall = withoutIncompatibleFunctionItemId({
+      const routedCall = {
         ...rest,
         type: "function_call",
         name: providerName,
-        arguments: historicalArguments ?? JSON.stringify({ [CUSTOM_TOOL_INPUT_PROPERTY]: customInput }),
-      });
+        arguments: JSON.stringify({ [CUSTOM_TOOL_INPUT_PROPERTY]: customInput }),
+      };
       SPECIAL_FUNCTION_REFERENCES.add(routedCall);
       return routedCall;
     }
@@ -489,7 +423,7 @@ export function bridgeCustomTools(
       bridgedCallIds.has(item.call_id)
     ) {
       changedInput = true;
-      return withoutIncompatibleFunctionItemId({ ...item, type: "function_call_output" });
+      return { ...item, type: "function_call_output" };
     }
     return item;
   });
@@ -499,61 +433,6 @@ export function bridgeCustomTools(
     toolChoice: routedToolChoice,
     bridged: changedTools || changedInput || changedToolChoice,
   };
-}
-
-// Extra provider-visible names that restore to an already-bridged native custom
-// tool. Used by the Grok edit facade to offer search_replace/write while Codex
-// still executes apply_patch. Aliases never create a native tool that the
-// client did not declare; they only add spellings onto an existing relay.
-export function registerCustomToolRelays(namespaces, aliases) {
-  if (!(namespaces instanceof Map) || !Array.isArray(aliases) || aliases.length === 0) {
-    return false;
-  }
-  const relays = CUSTOM_TOOL_RELAYS.get(namespaces);
-  const codecs = CUSTOM_TOOL_CODECS.get(namespaces);
-  if (!(relays instanceof Map) || !(codecs instanceof Map)) return false;
-  let changed = false;
-  for (const alias of aliases) {
-    const providerName = typeof alias?.providerName === "string" ? alias.providerName.trim() : "";
-    const nativeName = typeof alias?.nativeName === "string" ? alias.nativeName.trim() : "";
-    if (!providerName || !nativeName) continue;
-    if (![...relays.values()].includes(nativeName)) continue;
-    relays.set(providerName, nativeName);
-    if (alias.codec) codecs.set(providerName, alias.codec);
-    changed = true;
-  }
-  return changed;
-}
-
-// Provider-visible function names that restore to an ordinary client function
-// (not a custom tool). Used by the Grok read facade to offer read_file/grep
-// while Codex still executes exec_command. Relays never invent a native
-// function the client did not declare.
-export function registerFunctionRelays(namespaces, relays) {
-  if (!(namespaces instanceof Map) || !Array.isArray(relays) || relays.length === 0) {
-    return false;
-  }
-  const existing = FUNCTION_RELAYS.get(namespaces) ?? new Map();
-  let changed = false;
-  for (const relay of relays) {
-    const providerName = typeof relay?.providerName === "string" ? relay.providerName.trim() : "";
-    const nativeName = typeof relay?.nativeName === "string" ? relay.nativeName.trim() : "";
-    if (!providerName || !nativeName || typeof relay.rewriteArguments !== "function") continue;
-    existing.set(providerName, {
-      nativeName,
-      ...(typeof relay.nativeNamespace === "string" && relay.nativeNamespace
-        ? { nativeNamespace: relay.nativeNamespace }
-        : {}),
-      rewriteArguments: relay.rewriteArguments,
-      maxArgumentBytes: Number.isInteger(relay.maxArgumentBytes) && relay.maxArgumentBytes > 0
-        ? relay.maxArgumentBytes
-        : 256 * 1024,
-    });
-    changed = true;
-  }
-  if (!changed) return false;
-  FUNCTION_RELAYS.set(namespaces, existing);
-  return true;
 }
 
 function availableToolSearchName(tools) {
@@ -588,12 +467,11 @@ function schemaStringValues(schema, values = new Set()) {
 }
 
 // A fresh local thread inherits the routed session model when the caller did
-// not choose one. An in-session subagent keeps an explicit model: the client
-// offers the override as a plain string, Codex validates it against its own
-// list before dispatch, and returning it to the routed parent made a
-// cross-provider child impossible. Only a call that omits the model inherits
-// the parent. Follow-up messages intentionally keep the target thread's
-// settings, and cloud tasks require model omission, so neither is rewritten.
+// not choose one. An in-session subagent is always pinned to the routed parent:
+// its model argument is generated by the parent model, not an independent user
+// choice, and preserving a cross-provider value can silently cross a billing
+// boundary. Follow-up messages intentionally keep the target thread's settings,
+// and cloud tasks require model omission, so neither is rewritten.
 export const SPAWN_MODEL_TOOLS = new Set(["create_thread", "spawn_agent"]);
 const SPAWN_MODEL_NAMESPACES = new Map([
   ["codex_app", new Set(["create_thread"])],
@@ -618,39 +496,57 @@ function isSubagentSpawnCall(item) {
   return item.namespace === undefined && item.name === `collaboration${NAMESPACE_DELIMITER}spawn_agent`;
 }
 
-// Inject the session model into local create_thread calls that omitted it, and
-// into spawn_agent calls that carry no model of their own.
-//
-// An explicit subagent model wins. Codex ships the override as a plain string
-// on the tool schema rather than a schema enum, and validates the value against
-// its own advertised list, so anything that reaches here is the operator's own
-// delegation choice and not a value the parent model invented. Rewriting it
-// back to the routed parent discarded that choice and made a cross-provider
-// subagent impossible from any routed session, which is the one thing
-// `expose_spawn_agent_model_overrides = true` exists to allow.
-//
-// `sanitizeSpawnAgentModel` still drops a value outside the advertised set when
-// a client version does ship one, so that guard is unaffected: the item it
-// clears arrives here without a model and inherits the parent as before.
-//
-// A spawn_agent call that names another model but no reasoning depth keeps
-// whatever that model's catalog default is. For a model with a router-published
-// agent definition the configured depth travels inside that definition; for
-// every other model (native entries such as gpt-5.6-luna, which the routed
-// agent sync cannot publish) this relay is the only place it can travel, so
-// `effortForModel` supplies the operator's configured per-model subagent depth
-// and the child is created at that depth instead of the catalog default. An
-// explicit reasoning_effort always wins, and an unconfigured model is left
-// untouched.
-//
-// `model` is the routed session's model (route.slug). Returns a rewritten item
-// only when the call carries no model of its own; otherwise returns the item
-// untouched.
-export function injectSessionModelForSpawnCalls(item, model, effortForModel) {
+function sessionModelSlug(sessionModel) {
+  if (typeof sessionModel === "string") return sessionModel;
+  return typeof sessionModel?.parentRoute?.slug === "string"
+    ? sessionModel.parentRoute.slug
+    : undefined;
+}
+
+function policyRoutedSpawnCall(item, args, context) {
+  const hasAgentType = Object.hasOwn(args, "agent_type");
+  const agentType = typeof args.agent_type === "string" && args.agent_type
+    ? args.agent_type
+    : undefined;
+  const requestedModel = hasAgentType
+    ? `agent_type:${agentType || "<invalid>"}`
+    : typeof args.model === "string" && args.model
+      ? args.model
+      : undefined;
+  const result = resolveSubagentChildRoute({
+    parentRoute: context.parentRoute,
+    requestedModel,
+    requestedAgentTypeRoute: agentType ? context.agentTypeRoutes?.get(agentType) : undefined,
+    requestedEffort: args.reasoning_effort,
+    policy: context.policy,
+    maxChildTier: context.maxChildTier,
+    routesBySlug: context.routesBySlug,
+    isRouteEligible: context.isRouteEligible,
+  });
+  if (!result.route?.slug) return args;
+  if (result.diagnostic) context.onDiagnostic?.(result.diagnostic);
+  const next = { ...args, model: result.route.slug };
+  if (
+    args.reasoning_effort !== undefined &&
+    !result.route.reasoningLevels?.some((level) => level?.effort === args.reasoning_effort)
+  ) {
+    delete next.reasoning_effort;
+  }
+  // A routed agent_type ultimately selects its TOML model outside this tool
+  // call. Replace it with the policy-resolved canonical direct route so an
+  // unknown or cross-family definition cannot bypass the resolver.
+  if (hasAgentType) delete next.agent_type;
+  return next;
+}
+
+// Inject the session model into local create_thread calls that omitted it and
+// route every spawn_agent call through the parent session's Router policy. A
+// string session model retains the legacy exact-parent behavior used by older
+// callers; a policy context enables same-family selection for V2 routes.
+export function injectSessionModelForSpawnCalls(item, sessionModel) {
   if (!isSpawnModelCall(item)) return item;
-  if (typeof model !== "string" || !model) return item;
-  // Azure's plaintext handoff lets Codex honor its configured subagent model.
-  if (model.startsWith("azure-kmamc/") && isSubagentSpawnCall(item)) return item;
+  const model = sessionModelSlug(sessionModel);
+  if (!model) return item;
   if (typeof item.arguments !== "string") return item;
   if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return item;
   let args;
@@ -662,20 +558,11 @@ export function injectSessionModelForSpawnCalls(item, model, effortForModel) {
   if (typeof args !== "object" || args === null || Array.isArray(args)) return item;
   if (args.model !== undefined && !isSubagentSpawnCall(item)) return item;
   if (args.target?.type === "chatgptWorkCloud") return item;
-  if (typeof args.model === "string" && args.model) {
-    // An explicit subagent model keeps its own depth. When it has none, the
-    // operator's configured depth for that model is the documented default.
-    if (!isSubagentSpawnCall(item)) return item;
-    if (args.reasoning_effort !== undefined && args.reasoning_effort !== null) return item;
-    const slug = args.model.trim();
-    const effort = typeof effortForModel === "function" ? effortForModel(slug) : undefined;
-    if (typeof effort !== "string" || !effort.trim()) return item;
-    return {
-      ...item,
-      arguments: JSON.stringify({ ...args, reasoning_effort: effort.trim() }),
-    };
-  }
-  return { ...item, arguments: JSON.stringify({ ...args, model }) };
+  const next = isSubagentSpawnCall(item) && sessionModel?.parentRoute
+    ? policyRoutedSpawnCall(item, args, sessionModel)
+    : { ...args, model };
+  const argumentsText = JSON.stringify(next);
+  return argumentsText === item.arguments ? item : { ...item, arguments: argumentsText };
 }
 
 const MAX_JSON_CAPTURE_BYTES = 64 * 1024 * 1024;
@@ -690,7 +577,7 @@ const TRACKED_STATE_FIXED_BYTES = 512;
 // a later terminal event may carry the complete response and therefore shares
 // the non-streaming JSON capture bound. Crossing either phase's bound releases
 // raw bytes before a commit and terminates the stream after one.
-const MAX_SSE_FRAME_BYTES = 10 * 1024 * 1024;
+const MAX_SSE_FRAME_BYTES = 256 * 1024;
 const MAX_COMMITTED_SSE_FRAME_BYTES = MAX_JSON_CAPTURE_BYTES;
 const LINE_FEED = 0x0a;
 const CARRIAGE_RETURN = 0x0d;
@@ -963,7 +850,7 @@ function jsonIsUnambiguousForRewrite(text, { allowLossyNumbers = false } = {}) {
   }
 }
 
-export function jsonArgumentsAreUnambiguous(value, { allowEmpty = false } = {}) {
+function jsonArgumentsAreUnambiguous(value, { allowEmpty = false } = {}) {
   if (typeof value !== "string") return true;
   if (allowEmpty && value.trim() === "") return true;
   return jsonIsUnambiguousForRewrite(value);
@@ -977,7 +864,7 @@ export function jsonArgumentsAreUnambiguous(value, { allowEmpty = false } = {}) 
 // copy.
 export function repairToolSchemaRoot(
   tool,
-  { nonRecursive = false, inlineForeignRefs: inlineRefs = false, declareTypes = false } = {},
+  { nonRecursive = false, inlineForeignRefs: inlineRefs = false } = {},
 ) {
   // Moonshot alone rejects a `$ref` that does not point into `#/$defs/` or one
   // that carries sibling keywords, so only the route that asks for it pays the
@@ -986,10 +873,7 @@ export function repairToolSchemaRoot(
   // is not copied.
   const relaySchema = (schema) => {
     const repaired = providerToolSchema(schema);
-    const inlined = inlineRefs ? inlineForeignRefs(repaired) : repaired;
-    // After inlining, so a type is declared on the branches a `$ref` brought in
-    // rather than only on the reference that pointed at them.
-    return declareTypes ? declareSchemaTypes(inlined) : inlined;
+    return inlineRefs ? inlineForeignRefs(repaired) : repaired;
   };
 
   // Preserve the established shared-provider behavior byte-for-byte. Native
@@ -1076,57 +960,6 @@ export function stripSearchContentTypes(tools) {
   return changed ? stripped : tools;
 }
 
-const EMPTY_OBJECT_SCHEMA = Object.freeze({ type: "object", properties: Object.freeze({}) });
-
-function objectToolSchema(schema) {
-  if (schema && typeof schema === "object" && !Array.isArray(schema)) return schema;
-  return EMPTY_OBJECT_SCHEMA;
-}
-
-// Anthropic Messages (and LiteLLM's translation onto it) requires every tool to
-// have a string `name` and an object `input_schema`. Hosted/custom leftovers
-// become tools[N] without those fields and 400 the whole turn. Keep named
-// functions, flatten nested Chat Completions / inputSchema spellings onto
-// `parameters`, and drop everything else.
-export function anthropicFunctionTools(tools) {
-  if (!Array.isArray(tools)) return tools;
-  let changed = false;
-  const next = [];
-  for (const tool of tools) {
-    if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
-      changed = true;
-      continue;
-    }
-    const name = providerFunctionName(tool);
-    if (typeof name !== "string" || !name) {
-      changed = true;
-      continue;
-    }
-    if (tool.type && tool.type !== "function") {
-      changed = true;
-      continue;
-    }
-    const schema = tool.function?.parameters ?? tool.parameters ?? tool.inputSchema;
-    const parameters = objectToolSchema(schema);
-    const description = tool.description ?? tool.function?.description;
-    const alreadyValid =
-      tool.type === "function" &&
-      tool.name === name &&
-      tool.function === undefined &&
-      tool.inputSchema === undefined &&
-      tool.parameters === parameters &&
-      (tool.description ?? undefined) === description;
-    if (!alreadyValid) changed = true;
-    next.push(alreadyValid ? tool : {
-      type: "function",
-      name,
-      ...(description !== undefined ? { description } : {}),
-      parameters,
-    });
-  }
-  return changed ? next : tools;
-}
-
 // agent_message is a Codex collaboration input item, not part of the public
 // Responses schema OpenCode implements. The readable handoff has already been
 // recovered before this boundary, so keep its content and present it as the
@@ -1162,67 +995,15 @@ export function downgradeOriginalImageDetail(input) {
   return changed ? converted : input;
 }
 
-const REASONING_ENCRYPTED_INCLUDE = "reasoning.encrypted_content";
-
-function reasoningItemHasVisibleText(item) {
-  if (typeof item?.summary === "string" && item.summary) return true;
-  if (
-    Array.isArray(item?.summary) &&
-    item.summary.some((part) => typeof part?.text === "string" && part.text)
-  ) {
-    return true;
-  }
-  if (typeof item?.content === "string" && item.content) return true;
-  if (
-    Array.isArray(item?.content) &&
-    item.content.some((part) => typeof part?.text === "string" && part.text)
-  ) {
-    return true;
-  }
-  return false;
-}
-
-// OpenCode Zen's anonymous Muse Contributor Free Responses route is a Console
-// proxy. Meta issues reasoning `encrypted_content` to Console's caller, not to
-// this router. Replaying it 400s with "reasoning `encrypted_content` was not
-// issued to this caller". Drop the continuation token; keep any summary text.
-// Paid Zen/Go keep a stable key and stay outside this exact-route gate.
-export function stripUnissuedEncryptedReasoning(input) {
-  if (!Array.isArray(input)) return input;
-  let changed = false;
-  const next = [];
-  for (const item of input) {
-    if (item?.type !== "reasoning" || item.encrypted_content === undefined) {
-      next.push(item);
-      continue;
-    }
-    changed = true;
-    const { encrypted_content: _encryptedContent, ...rest } = item;
-    if (reasoningItemHasVisibleText(rest)) next.push(rest);
-  }
-  return changed ? next : input;
-}
-
-export function stripUnissuedEncryptedReasoningInclude(include) {
-  if (!Array.isArray(include)) return include;
-  const next = include.filter((entry) => entry !== REASONING_ENCRYPTED_INCLUDE);
-  if (next.length === include.length) return include;
-  return next.length > 0 ? next : undefined;
-}
-
 function flattenNamespaceChild(namespace, fn, providerName) {
   const clientSchema = fn.parameters ?? fn.inputSchema;
   const parameters =
     clientSchema === undefined ? undefined : providerToolSchema(clientSchema);
-  const flattened = {
+  return {
     ...fn,
     name: providerName ?? `${namespace}${NAMESPACE_DELIMITER}${fn.name}`,
     ...(parameters === undefined ? {} : { parameters }),
   };
-  if (fn.type === "custom") {
-    CUSTOM_TOOL_IDENTITIES.set(flattened, { namespace, name: fn.name });
-  }
-  return flattened;
 }
 
 // Flatten every namespace entry into plain functions named
@@ -1301,8 +1082,7 @@ export function flattenNamespaceTools(
         );
         names.add(fn.name);
         if (tool.name === "collaboration" && fn.name === "spawn_agent") {
-          const schema = fn.parameters ?? fn.inputSchema;
-          schemaStringValues(schema?.properties?.model, spawnAgentModels);
+          schemaStringValues(fn.inputSchema?.properties?.model, spawnAgentModels);
         }
       }
       if (names.size > 0) {
@@ -1334,123 +1114,188 @@ export function flattenNamespaceTools(
   return { tools: flattened, flattened: changed, namespaces };
 }
 
-// Codex may flatten native function/custom names before sending a custom-provider
-// request. Recover only declarations backed by its canonical turn metadata, then
-// let the normal namespace pipeline handle aliases, schemas, custom tools and
-// response restoration. Metadata alone must never add an executable tool.
-export function restorePreflattenedToolNamespaces(tools, clientMetadata) {
-  if (!Array.isArray(tools)) return tools;
+// A Codex custom-provider request can arrive with MCP tools already
+// flattened. In that shape the tool list no longer contains a
+// `type: "namespace"` entry, so flattenNamespaceTools cannot build the reverse
+// map needed when the provider returns the ordinary function call. Codex keeps
+// the canonical native identities in its reserved turn metadata. Recover only
+// direct functions whose exact flattened spelling is present in this request.
+//
+// The metadata also inventories ordinary functions under the default
+// `functions` namespace. Treat that entry, and any delimiter collision between
+// two native identities, as ambiguous rather than reinterpreting a legitimate
+// plain function as an MCP call. Keep this recovery MCP-scoped: app and
+// collaboration tools carry additional router-side behavior that a bare name
+// map cannot reconstruct safely.
+export function recoverPreflattenedMcpTools(tools, clientMetadata, namespaces) {
+  if (!Array.isArray(tools) || !(namespaces instanceof Map)) return false;
   const encoded = clientMetadata?.["x-codex-turn-metadata"];
-  if (typeof encoded !== "string" ||
-      !jsonIsUnambiguousForRewrite(encoded, { allowLossyNumbers: true })) return tools;
+  if (typeof encoded !== "string") return false;
+  if (!jsonIsUnambiguousForRewrite(encoded, { allowLossyNumbers: true })) return false;
   let metadata;
   try {
     metadata = JSON.parse(encoded);
   } catch {
-    return tools;
+    return false;
   }
   const inventory = metadata?.tool_namespaces_info;
-  if (!plainObject(inventory)) return tools;
+  if (!inventory || typeof inventory !== "object" || Array.isArray(inventory)) {
+    return false;
+  }
 
-  // Default-namespace entries are already plain tools. Never reinterpret a
-  // literal name containing __ merely because another namespace claims it.
+  const providerNames = new Set();
+  for (const tool of tools) {
+    if (tool?.type !== "function") continue;
+    const name = providerFunctionName(tool);
+    if (typeof name === "string" && name) providerNames.add(name);
+  }
+
   const ordinaryNames = new Set();
   if (Object.hasOwn(inventory, DEFAULT_FUNCTION_NAMESPACE)) {
     const ordinary = inventory[DEFAULT_FUNCTION_NAMESPACE];
-    if (ordinary?.name !== DEFAULT_FUNCTION_NAMESPACE ||
-        !plainObject(ordinary.functions)) return tools;
+    if (
+      ordinary?.name !== DEFAULT_FUNCTION_NAMESPACE ||
+      !ordinary.functions ||
+      typeof ordinary.functions !== "object" ||
+      Array.isArray(ordinary.functions)
+    ) {
+      return false;
+    }
     for (const [name, info] of Object.entries(ordinary.functions)) {
-      if (!name || !plainObject(info) || info.name !== name) return tools;
+      if (!name || !info || typeof info !== "object" || Array.isArray(info) || info.name !== name) {
+        return false;
+      }
       ordinaryNames.add(name);
     }
   }
 
+  // `undefined` marks a wire spelling with more than one native owner.
   const candidates = new Map();
-  const remember = (wireName, native) => {
+  const rememberCandidate = (wireName, native) => {
     if (!candidates.has(wireName)) {
       candidates.set(wireName, native);
       return;
     }
     const previous = candidates.get(wireName);
-    if (!previous || previous.namespace !== native.namespace ||
-        previous.name !== native.name) candidates.set(wireName, undefined);
+    if (
+      previous?.namespace !== native.namespace ||
+      previous?.name !== native.name
+    ) {
+      candidates.set(wireName, undefined);
+    }
   };
+
   for (const [namespace, namespaceInfo] of Object.entries(inventory)) {
-    if (!namespace || namespace === DEFAULT_FUNCTION_NAMESPACE ||
-        namespaceInfo?.name !== namespace || !plainObject(namespaceInfo.functions)) continue;
-    for (const [name, info] of Object.entries(namespaceInfo.functions)) {
-      const mcp = info?.source?.kind === "mcp" &&
-        typeof info.source.server_name === "string" && info.source.server_name &&
-        namespace === `${MCP_NAMESPACE_PREFIX}${info.source.server_name}`;
-      if (!name || info?.name !== name || info.direct !== true ||
-          (!mcp && info.source?.kind !== "harness")) continue;
-      remember(`${namespace}${NAMESPACE_DELIMITER}${name}`, { namespace, name });
-    }
-  }
-
-  const existingNamespaces = new Map();
-  const existingIdentities = new Set();
-  const repeatedNamespaces = new Set();
-  const declarations = new Map();
-  for (const tool of tools) {
-    if (tool?.type === "namespace" && Array.isArray(tool.tools)) {
-      if (existingNamespaces.has(tool.name)) repeatedNamespaces.add(tool.name);
-      existingNamespaces.set(tool.name, tool);
-      for (const child of tool.tools) {
-        if (typeof child?.name !== "string" || !child.name) continue;
-        remember(`${tool.name}${NAMESPACE_DELIMITER}${child.name}`,
-          { namespace: tool.name, name: child.name });
-        existingIdentities.add(nativeToolKey(tool.name, child.name));
-      }
-    } else if (tool?.type === "function" || tool?.type === "custom") {
-      const name = providerFunctionName(tool);
-      // Metadata has no function/custom discriminator. Repeated wire names
-      // cannot be safely assigned to one declaration, even across those types.
-      declarations.set(name, declarations.has(name) ? undefined : tool);
-    }
-  }
-
-  const recovered = new Map();
-  const groups = new Map();
-  for (const [wireName, native] of candidates) {
-    const tool = declarations.get(wireName);
-    if (!native || !tool || ordinaryNames.has(wireName) ||
-        repeatedNamespaces.has(native.namespace) ||
-        existingIdentities.has(nativeToolKey(native.namespace, native.name))) continue;
-    recovered.set(tool, native);
-    if (!groups.has(native.namespace)) {
-      const existing = existingNamespaces.get(native.namespace);
-      groups.set(native.namespace, existing
-        ? { ...existing, tools: [] }
-        : { type: "namespace", name: native.namespace, tools: [] });
-    }
-  }
-  if (!recovered.size) return tools;
-
-  // One declaration per namespace lets app expansion prefer the complete client
-  // schema without injecting the same deferred snapshot into multiple fragments.
-  const restored = [];
-  const emitted = new Set();
-  for (const tool of tools) {
-    const native = recovered.get(tool);
-    const group = native ? groups.get(native.namespace)
-      : tool?.type === "namespace" ? groups.get(tool.name) : undefined;
-    if (!group) {
-      restored.push(tool);
+    if (
+      !namespace ||
+      namespace === DEFAULT_FUNCTION_NAMESPACE ||
+      namespaceInfo?.name !== namespace
+    ) {
       continue;
     }
-    if (!emitted.has(group)) {
-      emitted.add(group);
-      restored.push(group);
-    }
-    if (native) {
-      const { function: definition, ...rest } = tool;
-      group.tools.push({ ...rest, ...definition, name: native.name });
-    } else {
-      group.tools.push(...tool.tools);
+    const functions = namespaceInfo?.functions;
+    if (!functions || typeof functions !== "object" || Array.isArray(functions)) continue;
+    for (const [name, info] of Object.entries(functions)) {
+      if (
+        !name ||
+        info?.name !== name ||
+        info.direct !== true ||
+        info.source?.kind !== "mcp" ||
+        typeof info.source.server_name !== "string" ||
+        !info.source.server_name ||
+        namespace !== `${MCP_NAMESPACE_PREFIX}${info.source.server_name}`
+      ) {
+        continue;
+      }
+      const wireName = `${namespace}${NAMESPACE_DELIMITER}${name}`;
+      const plainIdentity = nativeToolKey(undefined, wireName);
+      const providerName =
+        NAME_ALIASES.get(namespaces)?.nativeToProvider.get(plainIdentity) || wireName;
+      if (!providerNames.has(providerName) || ordinaryNames.has(wireName)) continue;
+      rememberCandidate(wireName, { namespace, name, providerName });
     }
   }
-  return restored;
+
+  const existingOwners = new Map();
+  for (const [namespace, names] of namespaces) {
+    for (const name of names) {
+      rememberCandidate(
+        `${namespace}${NAMESPACE_DELIMITER}${name}`,
+        { namespace, name },
+      );
+      existingOwners.set(`${namespace}${NAMESPACE_DELIMITER}${name}`, { namespace, name });
+    }
+  }
+
+  // Validate every ownership transfer before mutating any request-local map.
+  // flattenNamespaceTools has already registered these definitions as plain
+  // functions, including any provider-bounded alias. Move that exact provider
+  // spelling to the canonical MCP identity rather than allocating a second
+  // alias that no live definition uses.
+  const recoveries = [];
+  const recoveryProviderNames = new Set();
+  for (const [wireName, native] of candidates) {
+    if (!native || !providerNames.has(native.providerName)) continue;
+    const existing = existingOwners.get(wireName);
+    if (
+      existing &&
+      (existing.namespace !== native.namespace || existing.name !== native.name)
+    ) {
+      continue;
+    }
+    if (namespaces.get(native.namespace)?.has(native.name)) continue;
+
+    const relay = NAME_ALIASES.get(namespaces);
+    const plainIdentity = nativeToolKey(undefined, wireName);
+    const nativeIdentity = nativeToolKey(native.namespace, native.name);
+    if (relay) {
+      if (
+        relay.nativeToProvider.get(plainIdentity) !== native.providerName ||
+        relay.providerOwners.get(native.providerName) !== plainIdentity ||
+        (relay.nativeToProvider.has(nativeIdentity) &&
+          relay.nativeToProvider.get(nativeIdentity) !== native.providerName)
+      ) {
+        return false;
+      }
+    }
+    if (recoveryProviderNames.has(native.providerName)) return false;
+    recoveryProviderNames.add(native.providerName);
+    recoveries.push({
+      wireName,
+      providerName: native.providerName,
+      namespace: native.namespace,
+      name: native.name,
+      plainIdentity,
+      nativeIdentity,
+    });
+  }
+
+  for (const recovery of recoveries) {
+    const relay = NAME_ALIASES.get(namespaces);
+    if (relay) {
+      relay.nativeToProvider.delete(recovery.plainIdentity);
+      relay.nativeToProvider.set(recovery.nativeIdentity, recovery.providerName);
+      relay.providerOwners.set(recovery.providerName, recovery.nativeIdentity);
+      relay.providerToNative.set(recovery.providerName, {
+        namespace: recovery.namespace,
+        name: recovery.name,
+      });
+      relay.plainProviderNames.delete(recovery.providerName);
+      const wireOwners = relay.wireOwners.get(recovery.wireName);
+      if (wireOwners) {
+        wireOwners.delete(recovery.plainIdentity);
+        wireOwners.add(recovery.nativeIdentity);
+      }
+    }
+    PLAIN_TOOL_NAMES.get(namespaces)?.delete(recovery.providerName);
+    let names = namespaces.get(recovery.namespace);
+    if (!names) {
+      names = new Set();
+      namespaces.set(recovery.namespace, names);
+    }
+    names.add(recovery.name);
+  }
+  return recoveries.length > 0;
 }
 
 function plainObject(value) {
@@ -1618,12 +1463,6 @@ export function flattenToolSearchHistory(
   const initialNameAliases = new Map(
     NAME_ALIASES.get(namespaces)?.nativeToProvider || [],
   );
-  // The live tools' own wire spellings, captured before any discovery mints an
-  // alias of its own. `visibleNames` holds provider-facing names, and on a
-  // route that aliases collisions a discovery of the same wire spelling is
-  // handed a different one -- so comparing provider names alone let the stale
-  // discovered schema back in beside the live tool it was supposed to lose to.
-  const liveWireNames = new Set(NAME_ALIASES.get(namespaces)?.wireOwners?.keys() || []);
   const definitionOwnersByName = new Map();
   const discoveries = [];
   const discoveriesByOutputIndex = new Map();
@@ -1634,12 +1473,8 @@ export function flattenToolSearchHistory(
     for (const candidate of discoveredProviderTools(item.tools, namespaces)) {
       const name = providerFunctionName(candidate.tool);
       if (!name) continue;
-      const wireName = candidate.native
-        ? `${candidate.native.namespace}${NAMESPACE_DELIMITER}${candidate.native.name}`
-        : candidate.nativeName;
       const priorOwner = definitionOwnersByName.get(name);
-      const shadowedByClient =
-        (visibleNames.has(name) || liveWireNames.has(wireName)) && !priorOwner;
+      const shadowedByClient = visibleNames.has(name) && !priorOwner;
       const record = {
         ...candidate,
         name,
@@ -1734,11 +1569,6 @@ export function flattenToolSearchHistory(
   // a matching model-visible name cannot be attributed to a discovery.
   for (const name of CUSTOM_TOOL_RELAYS.get(namespaces)?.keys() || []) {
     const identity = `special:custom:${name}`;
-    identityOwners.set(identity, CURRENT_DEFINITION);
-    addOwner(providerOwners, name, identity);
-  }
-  for (const name of FUNCTION_RELAYS.get(namespaces)?.keys() || []) {
-    const identity = `special:function:${name}`;
     identityOwners.set(identity, CURRENT_DEFINITION);
     addOwner(providerOwners, name, identity);
   }
@@ -1917,7 +1747,6 @@ export function flattenNamespacedHistory(input, namespaces) {
     ...(nameRelay?.providerToNative.keys() || []),
     ...(nameRelay?.plainProviderNames || []),
     ...(CUSTOM_TOOL_RELAYS.get(namespaces)?.keys() || []),
-    ...(FUNCTION_RELAYS.get(namespaces)?.keys() || []),
   ]);
   const toolSearch = TOOL_SEARCH_RELAYS.get(namespaces);
   if (toolSearch) providerNames.add(toolSearch.providerName);
@@ -2165,12 +1994,6 @@ export function buildNamespaceLookups(namespaces) {
   const flatToNative = new Map();
   const bareToNamespaces = new Map();
   const nameAliases = NAME_ALIASES.get(namespaces);
-  const customTools = CUSTOM_TOOL_RELAYS.get(namespaces);
-  const bridgedCustomIdentities = new Set(
-    [...(customTools?.values() || [])]
-      .filter((native) => typeof native === "object")
-      .map((native) => nativeToolKey(native.namespace, native.name)),
-  );
   // Dotted wire spellings (`namespace.tool`) some Responses-native models emit
   // instead of `__` (#611). Collect candidates first; only an unambiguous
   // inventory pair is registered — never invent identity by splitting a name
@@ -2192,9 +2015,6 @@ export function buildNamespaceLookups(namespaces) {
   };
   for (const [namespace, names] of namespaces) {
     for (const name of names) {
-      // The custom relay owns this identity now, including any collision alias.
-      // Its former flattened spelling may belong to an ordinary function.
-      if (bridgedCustomIdentities.has(nativeToolKey(namespace, name))) continue;
       const providerName =
         nameAliases?.nativeToProvider.get(nativeToolKey(namespace, name)) ||
         `${namespace}${NAMESPACE_DELIMITER}${name}`;
@@ -2208,7 +2028,6 @@ export function buildNamespaceLookups(namespaces) {
   }
   if (nameAliases) {
     for (const [providerName, native] of nameAliases.providerToNative) {
-      if (bridgedCustomIdentities.has(nativeToolKey(native.namespace, native.name))) continue;
       flatToNative.set(providerName, native);
     }
   }
@@ -2234,9 +2053,7 @@ export function buildNamespaceLookups(namespaces) {
     identityAliases: Boolean(nameAliases),
     spawnAgentModels: SPAWN_AGENT_MODELS.get(namespaces),
     toolSearch: TOOL_SEARCH_RELAYS.get(namespaces),
-    customTools,
-    customCodecs: CUSTOM_TOOL_CODECS.get(namespaces),
-    functionRelays: FUNCTION_RELAYS.get(namespaces),
+    customTools: CUSTOM_TOOL_RELAYS.get(namespaces),
   };
 }
 
@@ -2264,34 +2081,6 @@ function sanitizeSpawnAgentModel(item, lookups) {
 // name (some models emit the unqualified form) is restored only when it is
 // unambiguous across every flattened namespace; a collision stays untouched
 // rather than guessing which runtime owns it.
-function providerFunctionNamespaceAbsent(item) {
-  return item?.namespace === undefined || item.namespace === null;
-}
-
-function functionRelayIdentityMatches(item, relay) {
-  if (!relay || item?.type !== "function_call" || item.name !== relay.nativeName) return false;
-  if (typeof relay.nativeNamespace === "string" && relay.nativeNamespace) {
-    return item.namespace === relay.nativeNamespace;
-  }
-  return item.namespace === undefined;
-}
-
-function restoreFunctionRelayCall(item, relay, argumentsText) {
-  const {
-    name: _name,
-    namespace: _namespace,
-    arguments: _arguments,
-    encrypted_function_args: _encryptedFunctionArgs,
-    ...rest
-  } = item;
-  return {
-    ...rest,
-    name: relay.nativeName,
-    ...(relay.nativeNamespace ? { namespace: relay.nativeNamespace } : {}),
-    arguments: argumentsText,
-  };
-}
-
 function rewriteFunctionCallArguments(item) {
   if (!item || typeof item !== "object") return item;
   if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return item;
@@ -2318,7 +2107,7 @@ function rewriteToolSearchFunctionCallItem(item, lookups, allowPlaceholder) {
     !relay ||
     item?.type !== "function_call" ||
     item.name !== relay.providerName ||
-    !providerFunctionNamespaceAbsent(item) ||
+    item.namespace !== undefined ||
     typeof item.call_id !== "string" ||
     !item.call_id
   ) {
@@ -2346,18 +2135,10 @@ function customToolInput(
   value,
   allowPlaceholder = false,
   property = CUSTOM_TOOL_INPUT_PROPERTY,
-  codec,
 ) {
   if (allowPlaceholder && (value === undefined || value === "")) return "";
-  const argumentsText = codec?.preserveRawArguments === true ? value : coerceFunctionCallArguments(value);
+  const argumentsText = coerceFunctionCallArguments(value);
   if (typeof argumentsText !== "string") return undefined;
-  if (codec) {
-    try {
-      return codec.decodeArguments(argumentsText);
-    } catch {
-      return undefined;
-    }
-  }
   if (!jsonArgumentsAreUnambiguous(argumentsText)) return undefined;
   try {
     const parsed = JSON.parse(argumentsText);
@@ -2367,42 +2148,17 @@ function customToolInput(
   }
 }
 
-// LiteLLM decides a native custom call's input itself: it unwraps a string
-// `content` from a JSON object and otherwise keeps the provider's arguments
-// verbatim (`unwrap_custom_tool_arguments` in its custom_tools module). Its
-// completed item carries that decision, so the relay must derive the same
-// input rather than a stricter one. A present non-string `content` has no
-// faithful equivalent of Python's str() and stays unsupported.
-const LITELLM_MAX_CUSTOM_ARGUMENTS_LENGTH = 1_000_000;
-
-function litellmCustomToolInput(argumentsText) {
-  if (typeof argumentsText !== "string") return undefined;
-  if (argumentsText === "") return "";
-  if (argumentsText.length > LITELLM_MAX_CUSTOM_ARGUMENTS_LENGTH) return argumentsText;
-  let parsed;
-  try {
-    parsed = JSON.parse(argumentsText);
-  } catch {
-    return argumentsText;
-  }
-  if (!plainObject(parsed) || !Object.hasOwn(parsed, LITELLM_CUSTOM_TOOL_INPUT_PROPERTY)) {
-    return argumentsText;
-  }
-  const content = parsed[LITELLM_CUSTOM_TOOL_INPUT_PROPERTY];
-  return typeof content === "string" ? content : undefined;
-}
-
 function rewriteCustomToolFunctionCallItem(item, lookups, allowPlaceholder) {
   if (
     item?.type !== "function_call" ||
-    !providerFunctionNamespaceAbsent(item) ||
+    item.namespace !== undefined ||
     !(lookups.customTools instanceof Map)
   ) {
     return undefined;
   }
-  const native = customToolIdentity(lookups.customTools.get(item.name));
-  if (!native) return undefined;
-  const input = customToolInput(item.arguments, allowPlaceholder, CUSTOM_TOOL_INPUT_PROPERTY, lookups.customCodecs?.get(item.name));
+  const nativeName = lookups.customTools.get(item.name);
+  if (!nativeName) return undefined;
+  const input = customToolInput(item.arguments, allowPlaceholder);
   if (input === undefined) return undefined;
   const {
     type: _type,
@@ -2414,85 +2170,23 @@ function rewriteCustomToolFunctionCallItem(item, lookups, allowPlaceholder) {
   return {
     ...rest,
     type: "custom_tool_call",
-    ...native,
+    name: nativeName,
     ...(allowPlaceholder && input === "" ? {} : { input }),
   };
-}
-
-function customToolIdentity(value) {
-  return typeof value === "string" ? { name: value } : value;
-}
-
-function customCallIdentityMatches(source, item, lookups) {
-  if (typeof item.name !== "string" || !item.name) return false;
-  if (source?.type === "function_call") {
-    if (!providerFunctionNamespaceAbsent(source)) return false;
-    const native = customToolIdentity(lookups.customTools?.get(source.name));
-    return Boolean(native && native.name === item.name && native.namespace === item.namespace);
-  }
-  // Native custom calls are not rewritten; keep their existing exact shape.
-  return source?.type === "custom_tool_call" && source.name === item.name &&
-    source.namespace === item.namespace &&
-    (item.namespace === undefined || (typeof item.namespace === "string" && Boolean(item.namespace)));
-}
-
-function markAzurePlaintextCollaborationCall(item, sessionModel) {
-  if (
-    !sessionModel?.startsWith("azure-kmamc/") ||
-    !["agents", "collaboration"].includes(item?.namespace) ||
-    !["spawn_agent", "send_message", "followup_task"].includes(item?.name) ||
-    item.encrypted_function_args !== undefined ||
-    !jsonArgumentsAreUnambiguous(item.arguments)
-  ) return item;
-  let args;
-  try {
-    args = JSON.parse(item.arguments);
-  } catch {
-    return item;
-  }
-  const message = args?.message;
-  if (typeof message !== "string" || !message || /^gAAAAA[A-Za-z0-9_-]+={0,2}$/.test(message)) {
-    return item;
-  }
-  return { ...item, encrypted_function_args: [] };
-}
-
-function restoreAzureCollaborationAlias(item, lookups, sessionModel) {
-  if (!sessionModel?.startsWith("azure-kmamc/") || item?.namespace !== "agents") return item;
-  const owners = lookups.bareToNamespaces.get(item.name);
-  if (!owners?.has("collaboration") || owners.has("agents")) return item;
-  return { ...item, namespace: "collaboration" };
 }
 
 function rewriteNamespaceFunctionCallItem(
   item,
   lookups,
   sessionModel,
-  { allowIncompleteToolSearch = false, effortForModel } = {},
+  { allowIncompleteToolSearch = false } = {},
 ) {
   if (!item || item.type !== "function_call") return undefined;
-  if (!rawCodecItem(item, lookups) && !jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return undefined;
+  if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return undefined;
   const exactPlainProviderIdentity =
     lookups.identityAliases &&
-    providerFunctionNamespaceAbsent(item) &&
+    item.namespace === undefined &&
     lookups.plainToolNames?.has(item.name);
-  const functionRelay = lookups.functionRelays instanceof Map
-    ? lookups.functionRelays.get(item.name)
-    : undefined;
-  if (functionRelay && providerFunctionNamespaceAbsent(item)) {
-    if (allowIncompleteToolSearch && (item.arguments === undefined || item.arguments === "")) {
-      return restoreFunctionRelayCall(item, functionRelay, item.arguments ?? "");
-    }
-    if (
-      typeof item.arguments !== "string" ||
-      Buffer.byteLength(item.arguments, "utf8") > functionRelay.maxArgumentBytes
-    ) {
-      return undefined;
-    }
-    const rewrittenArguments = functionRelay.rewriteArguments(item.arguments);
-    if (typeof rewrittenArguments !== "string") return undefined;
-    return restoreFunctionRelayCall(item, functionRelay, rewrittenArguments);
-  }
   const customTool = rewriteCustomToolFunctionCallItem(
     item,
     lookups,
@@ -2515,7 +2209,7 @@ function rewriteNamespaceFunctionCallItem(
   } else {
     const owners = lookups.bareToNamespaces.get(item.name);
     if (
-      providerFunctionNamespaceAbsent(item) &&
+      item.namespace === undefined &&
       !lookups.plainToolNames?.has(item.name) &&
       owners &&
       owners.size === 1
@@ -2527,37 +2221,35 @@ function rewriteNamespaceFunctionCallItem(
       };
     }
   }
-  rewritten = restoreAzureCollaborationAlias(rewritten, lookups, sessionModel);
-  rewritten = sanitizeSpawnAgentModel(rewritten, lookups);
+  const policyContext = isSubagentSpawnCall(rewritten) && sessionModel?.parentRoute;
   // A client may declare an ordinary function whose literal name is
   // `codex_app__create_thread`. Its request-local alias resolves back to that
   // exact plain identity, not the app namespace. Do not infer app semantics
   // from the restored spelling after the lookup has already proved otherwise.
+  if (!policyContext) rewritten = sanitizeSpawnAgentModel(rewritten, lookups);
   if (!exactPlainProviderIdentity) {
-    rewritten = injectSessionModelForSpawnCalls(rewritten, sessionModel, effortForModel);
+    rewritten = injectSessionModelForSpawnCalls(rewritten, sessionModel);
   }
+  // The policy sees the original spelling, then emits only a canonical Router
+  // route or the parent fallback. Do not run that trusted fallback through the
+  // client schema again: a schema that omits the parent must not turn a denial
+  // back into an omitted model selection.
   rewritten = rewriteFunctionCallArguments(rewritten);
-  rewritten = markAzurePlaintextCollaborationCall(rewritten, sessionModel);
   return rewritten === item ? undefined : rewritten;
 }
 
-export function rewriteNamespaceFunctionCall(event, lookups, sessionModel, {
-  effortForModel,
-} = {}) {
+export function rewriteNamespaceFunctionCall(event, lookups, sessionModel) {
   const item = rewriteNamespaceFunctionCallItem(event?.item, lookups, sessionModel, {
     allowIncompleteToolSearch: event?.type === "response.output_item.added",
-    effortForModel,
   });
   return item ? { ...event, item } : undefined;
 }
 
-function rewriteOutputItems(output, lookups, sessionModel, { effortForModel } = {}) {
+function rewriteOutputItems(output, lookups, sessionModel) {
   if (!Array.isArray(output)) return undefined;
   let changed = false;
   const rewritten = output.map((item) => {
-    const next = rewriteNamespaceFunctionCallItem(item, lookups, sessionModel, {
-      effortForModel,
-    });
+    const next = rewriteNamespaceFunctionCallItem(item, lookups, sessionModel);
     if (!next) return item;
     changed = true;
     return next;
@@ -2565,21 +2257,13 @@ function rewriteOutputItems(output, lookups, sessionModel, { effortForModel } = 
   return changed ? rewritten : undefined;
 }
 
-// Only the exact declared client-hook codec defers argument syntax to the
-// native hook. Identity, outer JSON, lifecycle and byte bounds stay enforced.
-function rawCodecItem(item, lookups) {
-  return item?.type === "function_call" && providerFunctionNamespaceAbsent(item) &&
-    lookups?.customCodecs?.get(item.name)?.preserveRawArguments === true;
-}
-
-function embeddedFunctionArgumentsAreUnambiguous(payload, lookups, rawArgumentsDone = false) {
+function embeddedFunctionArgumentsAreUnambiguous(payload) {
   const safeItem = (item) =>
-    item?.type !== "function_call" || rawCodecItem(item, lookups) ||
+    item?.type !== "function_call" ||
     jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true });
   if (!safeItem(payload?.item)) return false;
   if (
     payload?.type === "response.function_call_arguments.done" &&
-    !rawArgumentsDone &&
     !jsonArgumentsAreUnambiguous(payload.arguments, { allowEmpty: true })
   ) {
     return false;
@@ -2595,12 +2279,9 @@ function embeddedFunctionArgumentsAreUnambiguous(payload, lookups, rawArgumentsD
 // array instead of SSE `item` events. Restore both shapes through the same
 // exact request-local lookup so stream mode cannot change dispatch semantics.
 // Returns a copy only when at least one call was restored.
-export function rewriteNamespaceResponsePayload(payload, lookups, sessionModel, {
-  effortForModel,
-} = {}) {
+export function rewriteNamespaceResponsePayload(payload, lookups, sessionModel) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
-  let rewritten =
-    rewriteNamespaceFunctionCall(payload, lookups, sessionModel, { effortForModel }) || payload;
+  let rewritten = rewriteNamespaceFunctionCall(payload, lookups, sessionModel) || payload;
   let changed = rewritten !== payload;
 
   if (payload.type === "response.function_call_arguments.done") {
@@ -2615,15 +2296,13 @@ export function rewriteNamespaceResponsePayload(payload, lookups, sessionModel, 
     }
   }
 
-  const output = rewriteOutputItems(rewritten.output, lookups, sessionModel, { effortForModel });
+  const output = rewriteOutputItems(rewritten.output, lookups, sessionModel);
   if (output) {
     rewritten = { ...rewritten, output };
     changed = true;
   }
 
-  const responseOutput = rewriteOutputItems(rewritten.response?.output, lookups, sessionModel, {
-    effortForModel,
-  });
+  const responseOutput = rewriteOutputItems(rewritten.response?.output, lookups, sessionModel);
   if (responseOutput) {
     rewritten = {
       ...rewritten,
@@ -2800,14 +2479,13 @@ export class NamespaceToolCallTransform extends Transform {
   #maxTrackedStateBytes;
   #rewriteDisabled = false;
   #semanticMutationCommitted = false;
-  #requiresCodec = false;
   #lookups;
   #sessionModel;
-  #effortForModel;
   #pendingInterrupts;
   #injectOnly = false;
   #interruptedTargets = new Set();
   #lastSequence = 0;
+  #interruptSeq = 0;
   #injectQueue = [];
   #injectionsDone = false;
   #lastInjectedCalls = [];
@@ -2824,8 +2502,6 @@ export class NamespaceToolCallTransform extends Transform {
     super();
     this.#lookups = buildNamespaceLookups(namespaces);
     this.#sessionModel = sessionModel;
-    this.#effortForModel =
-      typeof options.effortForModel === "function" ? options.effortForModel : undefined;
     this.#pendingInterrupts = Array.isArray(options.pendingInterrupts)
       ? [...options.pendingInterrupts]
       : [];
@@ -2834,7 +2510,6 @@ export class NamespaceToolCallTransform extends Transform {
     // must not run the namespace rewrites (they exist for routed providers)
     // or re-serialize model-authored events it did not change.
     this.#injectOnly = Boolean(options.injectOnly);
-    this.#requiresCodec = !this.#injectOnly && this.#lookups.customCodecs?.size > 0;
     this.#maxJsonCaptureBytes =
       Number.isInteger(options.maxJsonCaptureBytes) && options.maxJsonCaptureBytes > 0
         ? options.maxJsonCaptureBytes
@@ -2926,13 +2601,11 @@ export class NamespaceToolCallTransform extends Transform {
         return;
       }
       if (!isUtf8(body)) {
-        this.#rejectCodecPassthrough("invalid UTF-8 JSON response");
         this.push(body);
         return;
       }
       const text = body.toString("utf8");
       if (!jsonIsUnambiguousForRewrite(text)) {
-        this.#rejectCodecPassthrough("ambiguous or invalid JSON response");
         this.push(body);
         return;
       }
@@ -2940,12 +2613,10 @@ export class NamespaceToolCallTransform extends Transform {
       try {
         original = JSON.parse(text);
       } catch {
-        this.#rejectCodecPassthrough("invalid JSON response");
         this.push(body);
         return;
       }
-      if (!embeddedFunctionArgumentsAreUnambiguous(original, this.#lookups)) {
-        this.#rejectCodecPassthrough("ambiguous function arguments");
+      if (!embeddedFunctionArgumentsAreUnambiguous(original)) {
         this.push(body);
         return;
       }
@@ -2955,17 +2626,8 @@ export class NamespaceToolCallTransform extends Transform {
           payload,
           this.#lookups,
           this.#sessionModel,
-          { effortForModel: this.#effortForModel },
         );
         if (rewritten) payload = rewritten;
-      }
-      if (this.#requiresCodec) {
-        const reason = this.#validateOutputItems(original, payload, { allowAtomic: true });
-        if (reason) this.#rejectCodecPassthrough(reason);
-        if (original?.item) {
-          const itemReason = this.#registerAtomicOutputItem(original.item, payload.item);
-          if (itemReason) this.#rejectCodecPassthrough(itemReason);
-        }
       }
       payload = this.#injectJsonInterrupts(payload);
       // Parsing is only permission to inspect. A response the transform did
@@ -2987,7 +2649,7 @@ export class NamespaceToolCallTransform extends Transform {
       tailSeparator = this.#separatorAfterSseTail(tail);
     }
     if (!this.#rewriteDisabled && this.#hasOpenSpecialCalls()) {
-      if (this.#semanticMutationCommitted || this.#requiresCodec) {
+      if (this.#semanticMutationCommitted) {
         throw new NamespaceRelayCommittedStreamError("unterminated special tool call");
       }
       this.#disableSseRewriting();
@@ -3028,7 +2690,6 @@ export class NamespaceToolCallTransform extends Transform {
       this.#pendingBytes += copied;
       offset += copied;
       if (this.#pendingBytes > this.#maxJsonCaptureBytes) {
-        this.#rejectCodecPassthrough("JSON response byte limit");
         for (let index = 0; index < this.#pendingParts.length; index += 1) {
           const part = this.#pendingParts[index];
           this.push(
@@ -3182,7 +2843,7 @@ export class NamespaceToolCallTransform extends Transform {
     }
     if (this.#sseBytes <= frameByteLimit) return true;
     const buffered = this.#takeSseFrame();
-    if (this.#semanticMutationCommitted || this.#requiresCodec) {
+    if (this.#semanticMutationCommitted) {
       throw new NamespaceRelayCommittedStreamError("SSE frame byte limit");
     }
     this.#disableSseRewriting();
@@ -3283,31 +2944,11 @@ export class NamespaceToolCallTransform extends Transform {
   }
 
   #unsafeSseFrame(frame, reason) {
-    if (this.#semanticMutationCommitted || this.#requiresCodec) {
+    if (this.#semanticMutationCommitted) {
       throw new NamespaceRelayCommittedStreamError(reason);
     }
     this.#disableSseRewriting();
     return [frame];
-  }
-
-  #rejectCodecPassthrough(reason) {
-    if (this.#requiresCodec) throw new NamespaceRelayCommittedStreamError(reason);
-  }
-
-  #nativeCodecBypass(item) {
-    if (!this.#requiresCodec || item?.type !== "custom_tool_call") return false;
-    let codecBackedName = false;
-    for (const [providerName, native] of this.#lookups.customTools) {
-      if (typeof native === "object") {
-        // A declared namespaced custom tool owns its identity and has no codec.
-        if (native.namespace === item.namespace && native.name === item.name) return false;
-      } else if (native === item.name && this.#lookups.customCodecs.has(providerName)) {
-        codecBackedName = true;
-      }
-    }
-    // A raw call carrying a codec-backed bare name, with or without a namespace
-    // nobody declared, would reach the client without the codec's checks.
-    return codecBackedName;
   }
 
   #disableSseRewriting() {
@@ -3332,9 +2973,6 @@ export class NamespaceToolCallTransform extends Transform {
     if (item?.type !== "function_call") return undefined;
     if (this.#lookups.customTools instanceof Map && this.#lookups.customTools.has(item.name)) {
       return "custom";
-    }
-    if (this.#lookups.functionRelays instanceof Map && this.#lookups.functionRelays.has(item.name)) {
-      return "function_codec";
     }
     if (item.name === this.#lookups.toolSearch?.providerName) return "tool_search";
     return undefined;
@@ -3374,20 +3012,14 @@ export class NamespaceToolCallTransform extends Transform {
   }
 
   #registerCall(sourceItem, item) {
-    if (this.#nativeCodecBypass(sourceItem)) return "structured tool bypassed its declared codec";
+    const kind = this.#specialCallKind(item);
     const sourceKind = this.#sourceSpecialCallKind(sourceItem);
-    const kind = sourceKind === "function_codec" ? "function_codec" : this.#specialCallKind(item);
     if ((sourceKind || kind) && sourceKind !== kind) {
       return "special tool call opening was not restored consistently";
     }
-    const functionRelay = sourceKind === "function_codec"
-      ? this.#lookups.functionRelays.get(sourceItem.name)
-      : undefined;
     if (
       (kind === "custom" &&
-        !customCallIdentityMatches(sourceItem, item, this.#lookups)) ||
-      (kind === "function_codec" &&
-        !functionRelayIdentityMatches(item, functionRelay)) ||
+        (typeof item.name !== "string" || !item.name || item.namespace !== undefined)) ||
       (kind === "tool_search" &&
         (item.name !== undefined ||
           item.namespace !== undefined ||
@@ -3441,26 +3073,7 @@ export class NamespaceToolCallTransform extends Transform {
               invalid: false,
             }
           : undefined,
-      functionRelay,
-      codec: sourceItem?.type === "function_call"
-        ? this.#lookups.customCodecs?.get(sourceItem.name) ||
-          (functionRelay
-            ? { maxArgumentBytes: functionRelay.maxArgumentBytes }
-            : undefined)
-        : undefined,
-      codecSourceHash: undefined,
-      codecSourceCharacters: 0,
-      codecSourceSeen: false,
-      codecFinalLength: undefined,
-      codecFinalDigest: undefined,
-      codecOpening: undefined,
     };
-    if (state.codec) {
-      state.codecSourceHash = createHash("sha256");
-      if (typeof sourceItem.arguments === "string" && sourceItem.arguments) {
-        state.codecOpening = stringFingerprint(sourceItem.arguments);
-      }
-    }
     return this.#storeCallState(state);
   }
 
@@ -3469,9 +3082,8 @@ export class NamespaceToolCallTransform extends Transform {
   // a closed lifecycle, but reserve its identities exactly like a streamed
   // opening so later events cannot change owners or replay it.
   #registerAtomicSpecialCall(sourceItem, item, { summarySeen = false } = {}) {
-    if (this.#nativeCodecBypass(sourceItem)) return "structured tool bypassed its declared codec";
     const sourceKind = this.#sourceSpecialCallKind(sourceItem);
-    const kind = sourceKind === "function_codec" ? "function_codec" : this.#specialCallKind(item);
+    const kind = this.#specialCallKind(item);
     if (!sourceKind || sourceKind !== kind) {
       return "atomic special tool call was incomplete or restored inconsistently";
     }
@@ -3495,32 +3107,26 @@ export class NamespaceToolCallTransform extends Transform {
 
     if (kind === "custom") {
       if (
-        !customCallIdentityMatches(sourceItem, item, this.#lookups) ||
+        typeof item.name !== "string" ||
+        !item.name ||
+        item.namespace !== undefined ||
         typeof item.input !== "string"
       ) {
         return "incomplete atomic custom tool call";
       }
       if (sourceItem.type === "function_call") {
+        const expectedName = this.#lookups.customTools?.get(sourceItem.name);
         if (
-          customToolInput(sourceItem.arguments, false, CUSTOM_TOOL_INPUT_PROPERTY, this.#lookups.customCodecs?.get(sourceItem.name)) !== item.input
+          expectedName !== item.name ||
+          customToolInput(sourceItem.arguments) !== item.input
         ) {
           return "atomic custom tool call was not restored consistently";
         }
       } else if (
+        sourceItem.name !== item.name ||
         sourceItem.input !== item.input
       ) {
         return "atomic custom tool call changed native content";
-      }
-    } else if (kind === "function_codec") {
-      const relay = this.#lookups.functionRelays?.get(sourceItem.name);
-      if (
-        !functionRelayIdentityMatches(item, relay) ||
-        typeof item.arguments !== "string"
-      ) {
-        return "incomplete atomic function relay call";
-      }
-      if (relay.rewriteArguments(sourceItem.arguments) !== item.arguments) {
-        return "atomic function relay call was not restored consistently";
       }
     } else {
       if (
@@ -3555,16 +3161,7 @@ export class NamespaceToolCallTransform extends Transform {
       : undefined;
     const finalArgumentsFingerprint = kind === "tool_search"
       ? canonicalJsonFingerprint(item.arguments)
-      : kind === "function_codec"
-        ? stringFingerprint(item.arguments)
-        : undefined;
-    const codec = sourceItem.type === "function_call"
-      ? this.#lookups.customCodecs?.get(sourceItem.name) ||
-        (kind === "function_codec"
-          ? { maxArgumentBytes: this.#lookups.functionRelays?.get(sourceItem.name)?.maxArgumentBytes }
-          : undefined)
       : undefined;
-    const codecFingerprint = codec ? stringFingerprint(sourceItem.arguments) : undefined;
     const state = {
       kind,
       itemId,
@@ -3586,10 +3183,6 @@ export class NamespaceToolCallTransform extends Transform {
       closed: true,
       summarySeen,
       deltaState: undefined,
-      functionRelay: kind === "function_codec" ? this.#lookups.functionRelays?.get(sourceItem.name) : undefined,
-      codec,
-      codecFinalLength: codecFingerprint?.length,
-      codecFinalDigest: codecFingerprint?.digest,
     };
     return this.#storeCallState(state);
   }
@@ -3702,8 +3295,7 @@ export class NamespaceToolCallTransform extends Transform {
       return { reason: "conflicting special tool call identity" };
     }
     const state = byItemId || byCallId;
-    if (!state) return this.#requiresCodec ? { reason: "arguments without a known output item" } : {};
-    if (!state.kind) return {};
+    if (!state || !state.kind) return {};
     if (event.item_id !== state.itemId) {
       return { reason: "mismatched special tool call item id" };
     }
@@ -3715,12 +3307,7 @@ export class NamespaceToolCallTransform extends Transform {
   }
 
   #customDeltaMismatch(state, inputFingerprint) {
-    if (state.codec) return undefined; // Source JSON is checked separately; no patch delta was emitted.
     if (!state.sawArgumentDelta) return undefined;
-    // LiteLLM keeps arguments that are not a leading `content` wrapper verbatim,
-    // so the incremental decoder cannot follow them. When it emitted no input
-    // text, the client saw nothing the completed input could contradict.
-    if (state.sourceType === "custom_tool_call" && state.deltaCharacters === 0) return undefined;
     if (
       state.deltaState.invalid ||
       !state.deltaState.opened ||
@@ -3736,30 +3323,6 @@ export class NamespaceToolCallTransform extends Transform {
     return streamed.equals(inputFingerprint.digest)
       ? undefined
       : "custom tool argument deltas disagree with completed input";
-  }
-
-  #validateCodecSource(state, argumentsText) {
-    if (!state.codec) return undefined;
-    if (typeof argumentsText !== "string" || Buffer.byteLength(argumentsText, "utf8") > state.codec.maxArgumentBytes) {
-      return "invalid or oversized structured arguments";
-    }
-    const fingerprint = stringFingerprint(argumentsText);
-    if (state.codecOpening && !fingerprintMatches(fingerprint, state.codecOpening.length, state.codecOpening.digest)) {
-      return "structured arguments changed after opening";
-    }
-    if (state.codecFinalDigest) {
-      return fingerprintMatches(fingerprint, state.codecFinalLength, state.codecFinalDigest)
-        ? undefined : "structured arguments changed after completion";
-    }
-    if (state.codecSourceSeen && (
-      state.codecSourceCharacters !== fingerprint.length ||
-      !state.codecSourceHash.copy().digest().equals(fingerprint.digest)
-    )) return "structured argument deltas disagree with completed arguments";
-    state.codecFinalLength = fingerprint.length;
-    state.codecFinalDigest = fingerprint.digest;
-    state.codecSourceHash = undefined;
-    state.codecOpening = undefined;
-    return undefined;
   }
 
   #closeOutputItem(sourceItem, item) {
@@ -3790,38 +3353,7 @@ export class NamespaceToolCallTransform extends Transform {
       state.closed = true;
       return undefined;
     }
-    if (state.kind === "function_codec") {
-      const codecReason = this.#validateCodecSource(state, sourceItem.arguments);
-      if (codecReason) return codecReason;
-      if (typeof item.arguments !== "string") {
-        return "function relay arguments changed before close";
-      }
-      const argumentsFingerprint = stringFingerprint(item.arguments);
-      if (
-        state.argumentsDone &&
-        !fingerprintMatches(
-          argumentsFingerprint,
-          state.finalArgumentsLength,
-          state.finalArgumentsDigest,
-        )
-      ) {
-        return "function relay arguments changed before close";
-      }
-      if (!state.argumentsDone) {
-        const expected = state.functionRelay?.rewriteArguments(sourceItem.arguments);
-        if (expected !== item.arguments) {
-          return "function relay arguments changed before close";
-        }
-        state.finalArgumentsLength = argumentsFingerprint.length;
-        state.finalArgumentsDigest = argumentsFingerprint.digest;
-      }
-      state.argumentsDone = true;
-      state.deltaHash = undefined;
-      state.deltaState = undefined;
-    }
     if (state.kind === "custom") {
-      const codecReason = this.#validateCodecSource(state, sourceItem.arguments);
-      if (codecReason) return codecReason;
       if (typeof item.input !== "string") {
         return "custom tool call input changed before close";
       }
@@ -3911,8 +3443,6 @@ export class NamespaceToolCallTransform extends Transform {
       return undefined;
     }
     if (state.kind === "custom") {
-      const codecReason = this.#validateCodecSource(state, sourceItem.arguments);
-      if (codecReason) return codecReason;
       if (typeof item.input !== "string") {
         return "custom tool call summary input changed after close";
       }
@@ -3937,23 +3467,6 @@ export class NamespaceToolCallTransform extends Transform {
         )
       ) {
         return "tool search arguments changed after close";
-      }
-    }
-    if (state.kind === "function_codec") {
-      const codecReason = this.#validateCodecSource(state, sourceItem.arguments);
-      if (codecReason) return codecReason;
-      if (typeof item.arguments !== "string") {
-        return "function relay arguments changed after close";
-      }
-      const argumentsFingerprint = stringFingerprint(item.arguments);
-      if (
-        !fingerprintMatches(
-          argumentsFingerprint,
-          state.finalArgumentsLength,
-          state.finalArgumentsDigest,
-        )
-      ) {
-        return "function relay arguments changed after close";
       }
     }
     if (allowAtomic) state.summarySeen = true;
@@ -4057,18 +3570,7 @@ export class NamespaceToolCallTransform extends Transform {
         // convenient when both claims are present and disagree.
         return this.#unsafeSseFrame(frame, "conflicting SSE event and JSON type");
       }
-      const rawDoneMatch = event?.type === "response.function_call_arguments.done"
-        ? this.#specialCallForArgumentsEvent(event) : undefined;
-      // LiteLLM's native custom lifecycle keeps provider arguments verbatim when
-      // they are not its JSON wrapper. They are not function arguments to
-      // rewrite; the custom-tool check below validates them instead.
-      const rawArgumentsDone = !rawDoneMatch?.reason && (
-        rawDoneMatch?.state?.codec?.preserveRawArguments === true ||
-        (rawDoneMatch?.state?.kind === "custom" &&
-          rawDoneMatch.state.sourceType === "custom_tool_call" &&
-          !rawDoneMatch.state.codec)
-      );
-      if (!embeddedFunctionArgumentsAreUnambiguous(event, this.#lookups, rawArgumentsDone)) {
+      if (!embeddedFunctionArgumentsAreUnambiguous(event)) {
         return this.#unsafeSseFrame(frame, "ambiguous function arguments");
       }
       const sourceEvent = event;
@@ -4103,20 +3605,6 @@ export class NamespaceToolCallTransform extends Transform {
             return this.#unsafeSseFrame(frame, "special tool call delta after arguments done");
           }
           if (matched.state.kind === "tool_search") {
-            this.#commitSemanticMutation();
-            return [];
-          }
-          if (matched.state.codec || matched.state.kind === "function_codec") {
-            // Hash the original JSON incrementally instead of retaining it or
-            // interpreting partial operations as executable patch text.
-            if (typeof event.delta !== "string") return this.#unsafeSseFrame(frame, "invalid structured argument delta");
-            matched.state.codecSourceSeen = true;
-            matched.state.codecSourceCharacters += event.delta.length;
-            const maxBytes = matched.state.codec?.maxArgumentBytes ?? matched.state.functionRelay?.maxArgumentBytes;
-            if (maxBytes && matched.state.codecSourceCharacters > maxBytes) {
-              return this.#unsafeSseFrame(frame, "structured argument delta limit");
-            }
-            matched.state.codecSourceHash.update(Buffer.from(event.delta, "utf16le"));
             this.#commitSemanticMutation();
             return [];
           }
@@ -4166,34 +3654,14 @@ export class NamespaceToolCallTransform extends Transform {
             this.#commitSemanticMutation();
             return [];
           }
-          if (matched.state.kind === "function_codec") {
-            const rewrittenArguments = matched.state.functionRelay?.rewriteArguments(event.arguments);
-            if (typeof rewrittenArguments !== "string") {
-              return this.#unsafeSseFrame(frame, "invalid function relay arguments done");
-            }
-            const codecReason = this.#validateCodecSource(matched.state, event.arguments);
-            if (codecReason) return this.#unsafeSseFrame(frame, codecReason);
-            const argumentsFingerprint = stringFingerprint(rewrittenArguments);
-            event = { ...event, arguments: rewrittenArguments };
-            matched.state.argumentsDone = true;
-            matched.state.finalArgumentsLength = argumentsFingerprint.length;
-            matched.state.finalArgumentsDigest = argumentsFingerprint.digest;
-            matched.state.deltaHash = undefined;
-            matched.state.deltaState = undefined;
-            changed = true;
-          } else {
           const argumentProperty =
             matched.state.sourceType === "custom_tool_call"
               ? LITELLM_CUSTOM_TOOL_INPUT_PROPERTY
               : CUSTOM_TOOL_INPUT_PROPERTY;
-          const input = matched.state.sourceType === "custom_tool_call" && !matched.state.codec
-            ? litellmCustomToolInput(event.arguments)
-            : customToolInput(event.arguments, false, argumentProperty, matched.state.codec);
+          const input = customToolInput(event.arguments, false, argumentProperty);
           if (input === undefined) {
             return this.#unsafeSseFrame(frame, "invalid custom tool arguments done");
           }
-          const codecReason = this.#validateCodecSource(matched.state, event.arguments);
-          if (codecReason) return this.#unsafeSseFrame(frame, codecReason);
           const inputFingerprint = stringFingerprint(input);
           const deltaReason = this.#customDeltaMismatch(
             matched.state,
@@ -4212,13 +3680,10 @@ export class NamespaceToolCallTransform extends Transform {
           matched.state.deltaHash = undefined;
           matched.state.deltaState = undefined;
           changed = true;
-          }
         }
       }
       if (!this.#injectOnly) {
-        const next = rewriteNamespaceResponsePayload(event, this.#lookups, this.#sessionModel, {
-          effortForModel: this.#effortForModel,
-        });
+        const next = rewriteNamespaceResponsePayload(event, this.#lookups, this.#sessionModel);
         if (next) {
           event = next;
           changed = true;
@@ -4322,10 +3787,9 @@ export class NamespaceToolCallTransform extends Transform {
     const blocks = [];
     const injectedCalls = [];
     for (const target of remaining) {
-      // Each transform is request-scoped, so a local counter would restart on
-      // every turn and reuse call IDs that remain in Codex conversation history.
-      // Use the same fresh-ID helper as the non-stream injection path instead.
-      const call = buildInterruptAgentCall(target);
+      this.#interruptSeq += 1;
+      const callId = `call_router_interrupt_${this.#interruptSeq}`;
+      const call = buildInterruptAgentCall(target, { callId });
       this.#interruptedTargets.add(target);
       injectedCalls.push(call);
       const addedSeq = this.#lastSequence + 1;

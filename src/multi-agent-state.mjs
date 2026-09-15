@@ -7,6 +7,10 @@ import path from "node:path";
 import { writePrivateJson } from "./file-security.mjs";
 import { STATE_DIR } from "./paths.mjs";
 import { applySubagentProofs, subagentProofSnapshot } from "./subagent-proofs.mjs";
+import {
+  normalizeMaxChildTier,
+  normalizeSubagentModelPolicy,
+} from "./subagent-model-policy.mjs";
 import { VERSION } from "./version.mjs";
 
 export const MULTI_AGENT_STATE_PATH =
@@ -20,7 +24,32 @@ export const MULTI_AGENT_ALL_PATH =
 export const SUBAGENT_MODES = Object.freeze(["all", "selected", "proven"]);
 
 function defaultSettings() {
-  return { version: 2, mode: "proven", enabled: [], disabled: [] };
+  return {
+    version: 2,
+    mode: "proven",
+    enabled: [],
+    disabled: [],
+    subagent_model_policy: "inherit",
+  };
+}
+
+function policySettings(parsed) {
+  try {
+    const policy = normalizeSubagentModelPolicy(parsed.subagent_model_policy);
+    const maxChildTier = normalizeMaxChildTier(parsed.max_child_tier);
+    if (policy !== "same-family") {
+      const { max_child_tier: _maxChildTier, ...withoutCeiling } = parsed;
+      return { ...withoutCeiling, subagent_model_policy: policy };
+    }
+    return {
+      ...parsed,
+      subagent_model_policy: policy,
+      ...(maxChildTier === undefined ? {} : { max_child_tier: maxChildTier }),
+    };
+  } catch {
+    const { max_child_tier: _maxChildTier, ...withoutInvalidPolicy } = parsed;
+    return { ...withoutInvalidPolicy, subagent_model_policy: "inherit" };
+  }
 }
 
 function legacySettings() {
@@ -49,7 +78,7 @@ export function readMultiAgentSettings() {
         Array.isArray(parsed.enabled) &&
         Array.isArray(parsed.disabled)
       ) {
-        return parsed;
+        return policySettings(parsed);
       }
     } catch {
       // Fall through to the legacy switch, then the conservative default.
@@ -125,7 +154,29 @@ export function setMultiAgentModels(slugs, enabled) {
     // Rebuilt literally rather than spread, so every writer has to carry the
     // effort map forward by hand or silently drop a user's choices.
     ...(current.efforts ? { efforts: current.efforts } : {}),
+    subagent_model_policy: current.subagent_model_policy,
+    ...(current.subagent_model_policy === "same-family" && current.max_child_tier !== undefined
+      ? { max_child_tier: current.max_child_tier }
+      : {}),
   };
+  writeSettings(next);
+  return subagentSettingsSnapshot();
+}
+
+export function setSubagentModelPolicy(policy, maxChildTier) {
+  const normalizedPolicy = normalizeSubagentModelPolicy(policy);
+  const normalizedTier = normalizeMaxChildTier(maxChildTier);
+  const current = readMultiAgentSettings();
+  const next = {
+    ...current,
+    version: 2,
+    subagent_model_policy: normalizedPolicy,
+  };
+  if (normalizedPolicy === "same-family" && normalizedTier !== undefined) {
+    next.max_child_tier = normalizedTier;
+  } else {
+    delete next.max_child_tier;
+  }
   writeSettings(next);
   return subagentSettingsSnapshot();
 }
@@ -178,13 +229,18 @@ export function replaceMultiAgentState({ mode, enabled = [], disabled = [], effo
   if (!SUBAGENT_MODES.includes(mode)) {
     throw new Error(`Unknown subagent mode "${mode}". Choose: ${SUBAGENT_MODES.join(", ")}`);
   }
-  const carried = efforts === undefined ? readMultiAgentSettings().efforts : efforts;
+  const current = readMultiAgentSettings();
+  const carried = efforts === undefined ? current.efforts : efforts;
   const next = {
     version: 2,
     mode,
     enabled: [...new Set(enabled)].sort(),
     disabled: [...new Set(disabled)].sort(),
     ...(carried && Object.keys(carried).length ? { efforts: carried } : {}),
+    subagent_model_policy: current.subagent_model_policy,
+    ...(current.subagent_model_policy === "same-family" && current.max_child_tier !== undefined
+      ? { max_child_tier: current.max_child_tier }
+      : {}),
   };
   writeSettings(next);
   return subagentSettingsSnapshot();
