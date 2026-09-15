@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "cliproxy",
+      "displayName": "CLIProxy",
+      "kind": "openai-compatible",
+      "ownedBy": "cliproxy",
+      "protocol": "openai-responses",
+      "baseUrl": "https://router.oloru.com/v1",
+      "baseUrlEnv": "CLIPROXY_API_BASE_URL",
+      "credential": {
+        "environment": [
+          "CLIPROXY_API_KEY"
+        ],
+        "file": "cliproxy-api-key.secret",
+        "legacyFiles": [],
+        "keychainServices": [
+          "codex-router-cliproxy"
+        ],
+        "prompt": "CLIProxy API key"
+      }
+    }
+  ]
+}
