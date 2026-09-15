@@ -1,14 +1,18 @@
 import { Transform } from "node:stream";
 import { TextDecoder } from "node:util";
 
-const MAX_FRAME_BYTES = 256 * 1024;
+// LiteLLM's bridge echoes the request's instructions and full tool list in
+// response.created, and a Codex Desktop tool list is larger than 256 KiB. A
+// smaller pre-commit bound releases that first frame and turns the repair off
+// for the whole stream, so match the namespace relay's prelude bound.
+const MAX_FRAME_BYTES = 10 * 1024 * 1024;
 const MAX_COMMITTED_FRAME_BYTES = 64 * 1024 * 1024;
 const LF_FRAME_SEPARATOR = Buffer.from("\n\n");
 const CRLF_FRAME_SEPARATOR = Buffer.from("\r\n\r\n");
 
 class GrokReasoningSummaryCommittedStreamError extends Error {
   constructor(reason) {
-    super(`Grok reasoning summary repair failed after stream mutation: ${reason}`);
+    super(`Reasoning summary repair failed after stream mutation: ${reason}`);
     this.name = "GrokReasoningSummaryCommittedStreamError";
   }
 }
@@ -154,13 +158,22 @@ function summaryText(item) {
     .join("");
 }
 
+function isGatewayErrorEnvelope(event) {
+  return event !== null && typeof event === "object" && !Array.isArray(event)
+    && !Object.hasOwn(event, "type")
+    && event.error !== null && typeof event.error === "object" && !Array.isArray(event.error);
+}
+
 // LiteLLM's Chat Completions -> Responses bridge can open an empty message
-// before Grok starts reasoning, and it hashes every reasoning delta into a
-// different item_id. Codex drops those orphaned deltas, so the user sees
-// silence while Grok is already streaming a summary. Normalize only that
-// summary lifecycle; other providers and non-SSE responses never enter here.
+// before the model starts reasoning, and it hashes every reasoning delta into a
+// different item_id. Codex drops those orphaned deltas, so the user sees no
+// reasoning while the model is already streaming a summary. This was found on
+// Grok and holds for every Chat Completions route through that bridge (Hy4,
+// DeepSeek on resellers, ...). Normalize only that summary lifecycle; canonical
+// streams pass byte-identical and non-SSE responses never enter here.
 export class GrokReasoningSummaryCompatTransform extends Transform {
   #frames;
+  #normalizeGatewayErrors;
   #disabled = false;
   #reasoning;
   #pendingMessage = [];
@@ -172,12 +185,15 @@ export class GrokReasoningSummaryCompatTransform extends Transform {
   #nextSequenceNumber;
   #repairedReasoningItems = [];
   #canonicalReasoningId;
+  #gatewayErrorTerminal = false;
 
   constructor({
     maxFrameBytes = MAX_FRAME_BYTES,
     maxCommittedFrameBytes = MAX_COMMITTED_FRAME_BYTES,
+    normalizeGatewayErrors = true,
   } = {}) {
     super();
+    this.#normalizeGatewayErrors = normalizeGatewayErrors === true;
     const limit = Number.isInteger(maxFrameBytes) && maxFrameBytes > 0
       ? maxFrameBytes
       : MAX_FRAME_BYTES;
@@ -191,6 +207,10 @@ export class GrokReasoningSummaryCompatTransform extends Transform {
 
   _transform(chunk, _encoding, callback) {
     try {
+      if (this.#gatewayErrorTerminal) {
+        callback();
+        return;
+      }
       const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       if (this.#disabled) {
         this.push(Buffer.from(piece));
@@ -201,7 +221,7 @@ export class GrokReasoningSummaryCompatTransform extends Transform {
         this.#emitFrame(block, separator, original)
       ));
       if (outcome?.oversized) this.#unsafeFrame(outcome.oversized, "SSE frame byte limit");
-      if (outcome?.remainder?.length) this.push(outcome.remainder);
+      if (!this.#gatewayErrorTerminal && outcome?.remainder?.length) this.push(outcome.remainder);
       callback();
     } catch (error) {
       callback(error);
@@ -210,6 +230,11 @@ export class GrokReasoningSummaryCompatTransform extends Transform {
 
   _flush(callback) {
     try {
+      if (this.#gatewayErrorTerminal) {
+        this.#frames.take();
+        callback();
+        return;
+      }
       if (this.#disabled) {
         const pending = this.#frames.take();
         if (pending.length) this.push(pending);
@@ -238,13 +263,17 @@ export class GrokReasoningSummaryCompatTransform extends Transform {
     const pieces = this.#rewriteBlock(text);
     const inferredSeparator = Buffer.from(text.includes("\r\n") ? "\r\n\r\n" : "\n\n");
     for (let index = 0; index < pieces.length; index += 1) {
-      const trailing = separator.length || index === pieces.length - 1
+      // The normalized terminal must be dispatchable even if the gateway
+      // closed its last JSON frame without a blank line.
+      const trailing = this.#gatewayErrorTerminal && !separator.length
+        ? inferredSeparator
+        : separator.length || index === pieces.length - 1
         ? separator
         : inferredSeparator;
       this.push(Buffer.concat([Buffer.from(pieces[index]), trailing]));
     }
     this.#currentSeparator = "";
-    return !this.#disabled;
+    return !this.#disabled && !this.#gatewayErrorTerminal;
   }
 
   #disable(original) {
@@ -334,7 +363,7 @@ export class GrokReasoningSummaryCompatTransform extends Transform {
       ?? (Number.isInteger(event.output_index) ? event.output_index : 0);
     this.#shiftOutputIndexes = this.#pendingMessage.length > 0;
     this.#reasoning = {
-      id: typeof event.item_id === "string" && event.item_id ? event.item_id : "rs_grok_summary",
+      id: typeof event.item_id === "string" && event.item_id ? event.item_id : "rs_reasoning_summary",
       outputIndex,
       text: "",
       partStarted: false,
@@ -412,6 +441,36 @@ export class GrokReasoningSummaryCompatTransform extends Transform {
     if (!parsed) return [block];
     const event = parsed.event;
     const type = event?.type;
+
+    // LiteLLM can turn a forwarder SSE error into an untyped gateway error,
+    // then append empty message closes. Recognize only the top-level envelope;
+    // text containing error-shaped JSON and canonical typed events stay intact.
+    // The Grok OAuth wording is proven for that route alone, so other routes
+    // relay the envelope byte-identical, after closing anything held here.
+    if (isGatewayErrorEnvelope(event) && !this.#normalizeGatewayErrors) {
+      return [
+        ...this.#finishReasoning(parsed, "incomplete"),
+        ...this.#flushPendingMessage(),
+        block,
+      ];
+    }
+    if (isGatewayErrorEnvelope(event)) {
+      this.#commitMutation(parsed);
+      const prefix = this.#finishReasoning(parsed, "incomplete");
+      this.#pendingMessage = [];
+      this.#gatewayErrorTerminal = true;
+      // Gateway messages may contain stack traces or request payloads. Emit a
+      // fixed safe error and suppress the rest of this upstream stream.
+      return [...prefix, this.#syntheticBlock("error", {
+        code: "local_router_stream_failed",
+        message: "The Grok gateway could not complete the upstream response stream.",
+        param: null,
+      }, {
+        ...parsed,
+        lines: ["event: error"],
+        newline: this.#currentSeparator === "\r\n\r\n" ? "\r\n" : parsed.newline,
+      })];
+    }
 
     if (!this.#reasoning && type === "response.output_item.added" && event?.item?.type === "message") {
       this.#message = {
@@ -675,9 +734,16 @@ export class GrokReasoningSummaryCompatTransform extends Transform {
   }
 }
 
-export function grokReasoningSummaryCompatTransform(provider, contentType = "") {
-  const providerId = typeof provider === "string" ? provider : provider?.id;
-  if (providerId !== "grok-oauth") return undefined;
+// Grok OAuth keeps its gateway-error normalization. Every other provider whose
+// turns LiteLLM translates from Chat Completions gets the summary repair only.
+// Direct DeepSeek has its own reasoning bridge repair in
+// deepseek-tool-message-compat.mjs, and Responses and Messages providers do not
+// come through this bridge, so none of those gain a stage.
+export function reasoningSummaryCompatTransform(provider, contentType = "") {
   if (!String(contentType).toLowerCase().includes("text/event-stream")) return undefined;
-  return new GrokReasoningSummaryCompatTransform();
+  const providerId = typeof provider === "string" ? provider : provider?.id;
+  if (providerId === "grok-oauth") return new GrokReasoningSummaryCompatTransform();
+  if (!provider || typeof provider !== "object" || providerId === "deepseek") return undefined;
+  if ((provider.protocol ?? "openai") !== "openai") return undefined;
+  return new GrokReasoningSummaryCompatTransform({ normalizeGatewayErrors: false });
 }

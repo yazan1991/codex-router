@@ -49,9 +49,7 @@ function option(name) {
 export function modelIds(payload, provider) {
   const data = Array.isArray(payload) ? payload : payload?.data ?? payload?.models;
   if (!Array.isArray(data)) throw new Error("The provider returned an invalid model list.");
-  const candidates = provider?.id === "chatgpt-web"
-    ? data.filter((item) => modelRecordId(item).startsWith("chatgpt-web/"))
-    : provider?.authMode === "anonymous"
+  const candidates = provider?.authMode === "anonymous"
     ? data.filter((item) => anonymousModelAllowed(provider, item?.id))
     : provider?.id === "orca"
     ? data.filter((item) => {
@@ -204,6 +202,19 @@ function advertisedContextLength(item) {
     if (smallest === undefined || value < smallest) smallest = value;
   }
   return smallest;
+}
+
+// Model id -> input modalities the provider itself stated for that model.
+// Present only where a record said so: curation must be able to tell a served
+// answer from the text-only default the merged view fills in.
+export function advertisedInputModalities(modelMetadata) {
+  const modalities = {};
+  for (const [id, metadata] of Object.entries(modelMetadata || {})) {
+    if (Array.isArray(metadata?.inputModalities) && metadata.inputModalities.length > 0) {
+      modalities[id] = [...metadata.inputModalities];
+    }
+  }
+  return modalities;
 }
 
 // Model id -> advertised context window, for the models `modelIds` kept. A
@@ -491,6 +502,7 @@ export async function discoverProviderModels(
     // Sizing the provider published for itself. Curation stores it rather than
     // guessing a window for a model whose catalog entry already names one.
     contextLengths,
+    inputModalities: advertisedInputModalities(modelMetadata),
     // Normalized provider-declared capabilities and documented supplements.
     // Missing fields stay missing: discovery is an evidence record, not a
     // reason to invent curation defaults or enable a route automatically.
@@ -553,6 +565,27 @@ export async function discoverGenericProviderModels(
     validateModelCatalogPayload(payload);
     discovered = modelIds(payload, descriptor);
     modelMetadata = metadataFromRecords(payload, descriptor);
+    // An OpenAI-compatible `/v1/models` list can say nothing about size or
+    // modalities (Ollama's does). When the same server describes its models
+    // individually, fill in exactly the fields the list left blank so
+    // curation stores the served window instead of its conservative guess.
+    if (!usingFixture && typeof snapshot.fetchModelDetails === "function") {
+      const details = await snapshot.fetchModelDetails({
+        ids: discovered,
+        fetchImpl,
+        timeoutMs,
+        resolveHost,
+        proxyResolvesDestination,
+      });
+      for (const [id, record] of Object.entries(details || {})) {
+        try {
+          const described = modelMetadataFromProviderRecord(record);
+          modelMetadata[id] = { ...described, ...(modelMetadata[id] || {}) };
+        } catch {
+          // One malformed description must not discard the catalog.
+        }
+      }
+    }
     fetchedAt = new Date().toISOString();
     if (storeAnswer) {
       if (genericProviderDiscoverySnapshot(providerId).identityFingerprint !== identityFingerprint) {
@@ -608,6 +641,7 @@ export async function discoverGenericProviderModels(
     blocked,
     unavailable: registered.filter((id) => !discoveredSet.has(id)),
     contextLengths,
+    inputModalities: advertisedInputModalities(modelMetadata),
     modelMetadata: merged,
     cached: Boolean(cached),
     stale: Boolean(cached?.stale),

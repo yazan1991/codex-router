@@ -140,97 +140,6 @@ test("OpenCode Free Muse curation carries its model-specific tool-choice repair"
   assert.equal(curatedModelRequestProfile("opencode-free", "nemotron-3-ultra-free"), undefined);
 });
 
-test("ChatGPT Web curation keeps the upstream slug and immutable account effort", () => {
-  assert.deepEqual(curationProviderIds("chatgpt-web"), ["chatgpt-web"]);
-  assert.equal(
-    userModelIdentity({ providerId: "chatgpt-web", upstreamId: "chatgpt-web/pro" }).slug,
-    "chatgpt-web/pro",
-  );
-  assert.deepEqual(curatedModelReasoningLevels("chatgpt-web", "chatgpt-web/light"), ["low"]);
-  assert.deepEqual(curatedModelReasoningLevels("chatgpt-web", "chatgpt-web/pro"), ["ultra"]);
-  assert.equal(parseEfforts("ultra").defaultEffort, "ultra");
-});
-
-test("ChatGPT Web curation accepts the current CGW catalog and preserves its supported metadata", () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "curate-chatgpt-web-"));
-  const file = path.join(dir, "user-models.json");
-  const fixture = path.join(dir, "models.json");
-  const routes = [
-    ["chatgpt-web/light", "ChatGPT Web — Instant", "low"],
-    ["chatgpt-web/medium", "ChatGPT Web — Medium", "medium"],
-    ["chatgpt-web/high", "ChatGPT Web — High", "high"],
-    ["chatgpt-web/extra-high", "ChatGPT Web — Extra High", "xhigh"],
-    ["chatgpt-web/pro", "ChatGPT Web — Pro", "ultra"],
-  ];
-  writeFileSync(fixture, JSON.stringify({
-    object: "list",
-    data: [
-      ...routes.map(([id, displayName, effort], index) => ({
-        id,
-        object: "model",
-        display_name: displayName,
-        description: `CGW account route ${id}`,
-        context_window: 128_000 + index,
-        auto_compact_token_limit: 100_000 + index,
-        input_modalities: ["text", "image"],
-        supported_reasoning_levels: [{ effort, description: displayName }],
-        default_reasoning_level: effort,
-      })),
-      { id: "gpt-6-astra", display_name: "Native row must stay out" },
-      { id: "attacker/arbitrary", display_name: "Arbitrary row must stay out" },
-    ],
-  }));
-  try {
-    const result = spawnSync(
-      process.execPath,
-      [
-        path.join(root, "src", "curate-models.mjs"),
-        "chatgpt-web",
-        "--models",
-        routes.map(([id]) => id).join(","),
-        "--fixture",
-        fixture,
-        "--no-apply",
-      ],
-      {
-        cwd: root,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          MODEL_ROUTER_STATE_DIR: path.join(dir, "state"),
-          MODEL_ROUTER_USER_MODELS: file,
-        },
-      },
-    );
-    assert.equal(result.status, 0, result.stderr);
-    const models = JSON.parse(readFileSync(file, "utf8")).models;
-    assert.deepEqual(models.map((model) => model.upstreamModel), routes.map(([id]) => id));
-    for (const [index, [id, displayName, effort]] of routes.entries()) {
-      const model = models[index];
-      assert.equal(model.slug, id);
-      assert.equal(model.displayName, displayName);
-      assert.equal(model.description, `CGW account route ${id}`);
-      assert.equal(model.contextWindow, 128_000 + index);
-      assert.equal(model.autoCompact, 100_000 + index);
-      assert.deepEqual(model.inputModalities, ["text", "image"]);
-      assert.deepEqual(model.reasoningLevels, [{
-        effort,
-        description: {
-          low: "Quick reasoning",
-          medium: "Balanced reasoning",
-          high: "Deep reasoning",
-          xhigh: "Extended reasoning",
-          ultra: "Pro reasoning",
-        }[effort],
-      }]);
-      assert.equal(model.defaultEffort, effort);
-    }
-    assert.ok(models.every((model) => model.upstreamModel.startsWith("chatgpt-web/")));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test("Command Code curation accepts only its exact certified Chat and Messages routes", () => {
   assert.deepEqual(curationProviderIds("commandcode"), [
     "commandcode",
@@ -1442,6 +1351,59 @@ test("--efforts still overrides a documented ladder", () => {
     assert.equal(stored.contextWindow, 256_000);
     assert.match(stored.description, /256,000/);
     assert.doesNotMatch(stored.description, /low\/medium\/high ladder/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("scripted curation records that a served window and modalities came from the provider's catalog", () => {
+  const providerId = "openrouter";
+  const upstreamModel = "vendor/sized";
+  const dir = mkdtempSync(path.join(os.tmpdir(), "curate-advertised-"));
+  const file = path.join(dir, "user-models.json");
+  const fixture = path.join(dir, "models.json");
+  writeFileSync(fixture, JSON.stringify({ data: [
+    { id: upstreamModel, context_length: 1048576, architecture: { input_modalities: ["text", "image", "file"] } },
+    { id: "vendor/silent" },
+    { id: "vendor/audio-only", architecture: { input_modalities: ["audio"] } },
+  ] }));
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(root, "src", "curate-models.mjs"),
+        providerId,
+        "--models",
+        `${upstreamModel},vendor/silent,vendor/audio-only`,
+        "--fixture",
+        fixture,
+        "--no-apply",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: path.join(dir, "codex"),
+          MODEL_ROUTER_STATE_DIR: dir,
+          MODEL_ROUTER_USER_MODELS: file,
+          MODEL_ROUTER_MODEL_PICKER_STATE: path.join(dir, "model-picker.json"),
+          OPENROUTER_API_KEY: "",
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const models = JSON.parse(readFileSync(file, "utf8")).models;
+    const sized = models.find((model) => model.upstreamModel === upstreamModel);
+    assert.equal(sized.contextWindow, 1048576);
+    assert.deepEqual(sized.inputModalities, ["text", "image"], "file is advertised but not publishable; text and image survive");
+    assert.match(sized.description, /context window and input modalities as advertised by the provider's catalog/);
+    const audioOnly = models.find((model) => model.upstreamModel === "vendor/audio-only");
+    assert.deepEqual(audioOnly.inputModalities, ["text"], "an unpublishable modality set falls back to the default, never an empty list");
+    assert.match(audioOnly.description, /conservative default metadata/);
+    const silent = models.find((model) => model.upstreamModel === "vendor/silent");
+    assert.equal(silent.contextWindow, 131072);
+    assert.match(silent.description, /conservative default metadata/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

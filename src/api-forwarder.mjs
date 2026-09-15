@@ -1,4 +1,10 @@
 import http from "node:http";
+import { usesNativeChatReasoning } from "./chat-reasoning.mjs";
+import {
+  deepSeekResponsesEffort,
+  deepSeekResponsesInput,
+  usesDeepSeekResponses,
+} from "./deepseek-responses.mjs";
 
 import {
   applyKeepAliveTimeouts,
@@ -32,6 +38,8 @@ import {
 } from "./rate-limit-headers.mjs";
 import { recordRateLimitSnapshot } from "./rate-limit-state.mjs";
 import { recordProviderCooldown } from "./model-failover.mjs";
+import { moonshotSchemaRoute } from "./moonshot-schema-routes.mjs";
+import { cooldownScope } from "./provider-cooldown.mjs";
 import { canonicalProviderId, readProviderSelection } from "./provider-selection.mjs";
 import { stripImages, supportsImageInput } from "./vision-bridge.mjs";
 import {
@@ -70,11 +78,13 @@ import {
   runProviderApiKeyAttempts,
 } from "./provider-api-key-pool.mjs";
 import {
+  inlineDanglingNestedDefsRefs,
   nonRecursiveToolSchema,
   stripCodexEncryptedSchemaAnnotation,
 } from "./tool-schema-root.mjs";
 import { requestGenericProvider } from "./generic-providers.mjs";
 import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
+import { withoutInputMessagePhase } from "./message-phase.mjs";
 import { providerTransportError } from "./transport-failure.mjs";
 import {
   endpointCapabilityError,
@@ -242,7 +252,7 @@ function coalesceAssistantMessages(messages) {
   return coalesced;
 }
 
-function restoreGlmReasoningContent(messages) {
+function restoreNativeReasoningContent(messages) {
   if (!Array.isArray(messages)) return messages;
   return messages.map((message) => {
     if (message?.role !== "assistant" || !Array.isArray(message.content)) return message;
@@ -387,6 +397,26 @@ function stripEncryptedToolSchemaAnnotations(payload, protocol) {
   if (changed) payload.tools = tools;
 }
 
+// The direct Gemini API rejected Zillow's bedrooms schema: its root $defs
+// pointer names a definition stored under request instead. Repair only that
+// malformed-reference class; ordinary property and valid root refs stay intact.
+function inlineGeminiToolSchemaRefs(payload) {
+  if (!Array.isArray(payload.tools)) return;
+  let changed = false;
+  const tools = payload.tools.map((tool) => {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool) || tool.type !== "function") {
+      return tool;
+    }
+    const fn = tool.function;
+    if (!fn || typeof fn !== "object" || Array.isArray(fn)) return tool;
+    const repaired = inlineDanglingNestedDefsRefs(fn.parameters);
+    if (repaired === fn.parameters) return tool;
+    changed = true;
+    return { ...tool, function: { ...fn, parameters: repaired } };
+  });
+  if (changed) payload.tools = tools;
+}
+
 // Meta's Console API behind opencode answers a self-referencing tool schema
 // with a bare 400 naming neither the tool nor the definition, and the turn is
 // lost. Measured against that endpoint, an ordinary `$ref`/`$defs` pair is
@@ -394,7 +424,7 @@ function stripEncryptedToolSchemaAnnotations(payload, protocol) {
 // `nonRecursiveToolSchema` -- which blanks exactly the cycle-closing edge and
 // returns any other schema by identity -- is the whole fix. The namespace relay
 // already uses it for the same reason.
-function flattenRecursiveToolSchemas(payload, protocol) {
+function flattenRecursiveToolSchemas(payload, protocol, options) {
   if (!Array.isArray(payload.tools)) return;
   let changed = false;
   const tools = payload.tools.map((tool) => {
@@ -402,14 +432,14 @@ function flattenRecursiveToolSchemas(payload, protocol) {
       return tool;
     }
     if (protocol === "openai-responses") {
-      const flattened = nonRecursiveToolSchema(tool.parameters);
+      const flattened = nonRecursiveToolSchema(tool.parameters, options);
       if (flattened === tool.parameters) return tool;
       changed = true;
       return { ...tool, parameters: flattened };
     }
     const fn = tool.function;
     if (!fn || typeof fn !== "object" || Array.isArray(fn)) return tool;
-    const flattened = nonRecursiveToolSchema(fn.parameters);
+    const flattened = nonRecursiveToolSchema(fn.parameters, options);
     if (flattened === fn.parameters) return tool;
     changed = true;
     return { ...tool, function: { ...fn, parameters: flattened } };
@@ -757,7 +787,24 @@ function normalizeBody(buffer, contentType, route) {
   // Responses request, but legacy aliases are normalized before any provider
   // sees it and the original payload remains available for retries.
   if (provider.protocol === "openai-responses") {
+    if (usesDeepSeekResponses(model)) {
+      // Codex subagent overrides may supply both spellings. Responses uses
+      // the nested effort and must not inherit the Chat thinking parameters.
+      const effort = payload.reasoning?.effort ?? payload.reasoning_effort ??
+        (model.requestProfile === "deepseek-nonthinking" ? "none" : undefined);
+      payload.reasoning = { effort: deepSeekResponsesEffort(effort) };
+      payload.input = deepSeekResponsesInput(payload.input);
+      delete payload.reasoning_effort;
+      delete payload.thinking;
+    }
     payload = normalizeOpenAIRequest(payload);
+    // The router labels routed assistant messages with Codex's `phase`, and
+    // Codex replays it on every later turn. An operator-configured Responses
+    // endpoint is an unknown validator, so it gets the pre-label history
+    // shape. Built-in Responses providers keep the field.
+    if (provider.generic === true) {
+      payload.input = withoutInputMessagePhase(payload.input);
+    }
   }
 
   // OpenAI Chat Completions providers place terminal usage in a final empty
@@ -836,6 +883,9 @@ function normalizeBody(buffer, contentType, route) {
   }
   if (Array.isArray(payload.messages)) {
     payload.messages = sanitizeChatToolHistory(payload.messages, provider, model);
+    if (usesNativeChatReasoning(model)) {
+      payload.messages = restoreNativeReasoningContent(payload.messages);
+    }
   }
   if (provider.authProfile === "github-copilot") {
     // This is native ChatGPT account metadata, not an upstream scheduling
@@ -875,12 +925,19 @@ function normalizeBody(buffer, contentType, route) {
   if (model.requestProfile === "codex-encrypted-schema") {
     stripEncryptedToolSchemaAnnotations(payload, provider.protocol);
   }
+  if (provider.id === "gemini-api") {
+    inlineGeminiToolSchemaRefs(payload);
+  }
   // Deliberately its own statement rather than a branch of the profile chain
   // below: this is an upstream limitation, and every route that has it also
   // needs a request profile of its own, which the single-valued field cannot
   // express.
   if (model.toolSchemaRecursion === "flatten") {
-    flattenRecursiveToolSchemas(payload, provider.protocol);
+    // Only locally curated Moonshot models currently opt into flattening.
+    // Preserve recoverable types there; stock Kimi never enters this branch.
+    flattenRecursiveToolSchemas(payload, provider.protocol, {
+      keepBlankedTypes: moonshotSchemaRoute(provider.id, model.upstreamModel),
+    });
   }
   if (model.requestProfile === "clinepass") {
     delete payload.reasoning_effort;
@@ -892,7 +949,7 @@ function normalizeBody(buffer, contentType, route) {
     if (effort) payload.reasoning_effort = effort;
     else delete payload.reasoning_effort;
     delete payload.thinking;
-  } else if (model.requestProfile === "deepseek-thinking") {
+  } else if (model.requestProfile === "deepseek-thinking" && !usesDeepSeekResponses(model)) {
     payload.thinking = { type: "enabled" };
     payload.reasoning_effort = deepSeekEffort(payload.reasoning_effort);
     delete payload.temperature;
@@ -907,7 +964,7 @@ function normalizeBody(buffer, contentType, route) {
     if (payload.tool_choice !== undefined && payload.tool_choice !== "none") {
       payload.tool_choice = "auto";
     }
-  } else if (model.requestProfile === "deepseek-nonthinking") {
+  } else if (model.requestProfile === "deepseek-nonthinking" && !usesDeepSeekResponses(model)) {
     payload.thinking = { type: "disabled" };
     delete payload.reasoning_effort;
   } else if (
@@ -983,7 +1040,6 @@ function normalizeBody(buffer, contentType, route) {
     }
   } else if (model.requestProfile === "glm-thinking") {
     payload.thinking = { type: "enabled", clear_thinking: false };
-    payload.messages = restoreGlmReasoningContent(payload.messages);
     // Each GLM entry declares exactly the tiers Z.ai documents for it, and the
     // requested effort is clamped onto them. Models whose registry entry offers
     // a single level (GLM-5-Turbo, GLM-4.7) do not support the parameter at
@@ -1182,10 +1238,11 @@ async function relayUpstreamResponse(
   const responsesJson = normalized.responseAdapter === "responses" &&
     upstream.ok && upstreamContentType.toLowerCase().includes("application/json");
   
-  // Build namespace lookups from the flattened tools in the request payload
-  // to restore namespaced function calls (e.g., "multi_agent_v1__spawn_agent" 
-  // back to { namespace: "multi_agent_v1", name: "spawn_agent" })
-  const flatToNative = (responsesStream || responsesJson)
+  // Direct DeepSeek calls arrive with an outer, authoritative namespace/custom
+  // map. Preserve their wire names here; guessing a namespace from a flattened
+  // name would restore it before the outer custom-tool bridge can consume it.
+  // Other native routes retain this forwarder's established namespace lookup.
+  const flatToNative = (responsesStream || responsesJson) && !usesDeepSeekResponses(normalized.model)
     ? buildNamespaceLookupsFromTools(normalized.payload?.tools)
     : new Map();
   
@@ -1229,9 +1286,13 @@ async function upstreamSession(provider, credential, payload, options = {}, endp
 // never sit in time-to-first-byte.
 function recordUpstreamLimits(normalized, upstream) {
   const rateLimit = parseRateLimitHeaders(upstream.headers);
-  // Variant-routed responses meter the same upstream subscription, so quota
-  // headers land under the family's canonical provider id.
-  if (rateLimit) recordRateLimitSnapshot(canonicalProviderId(normalized.provider.id), rateLimit);
+  // Keyed by cooldown scope, the same identity `recordProviderCooldown` uses
+  // below. A protocol variant meters its parent's subscription and shares its
+  // key, but opencode Zen is billed at its own endpoint: canonicalizing here
+  // filed Zen's window under the Go plan, so each plan's response overwrote the
+  // other's snapshot and neither could be read back under the id that produced
+  // it.
+  if (rateLimit) recordRateLimitSnapshot(cooldownScope(normalized.provider.id), rateLimit);
   // This hop is the only place the provider's own status and headers are seen
   // before LiteLLM restates them, so it is the only place a reset time the
   // gateway does not relay can still be read. A failure that names when the

@@ -242,6 +242,7 @@ export interface RouterTarget {
   routerDefaultModel?: string;
   routerDefaultManaged?: boolean;
   usageEvents?: UsageEvent[];
+  usageEventHours?: UsageEventHour[];
   modelSettings?: {
     subagents: SubagentSettings;
     picker: { hidden: string[]; visible?: string[]; hasExplicitVisibility?: boolean; path?: string };
@@ -526,6 +527,21 @@ export interface ProviderUsageSnapshot {
   providers: ProviderUsage[];
 }
 
+// One local hour of router traffic, aggregated by the router over the whole
+// window rather than over the capped `usageEvents` sample. `usageEvents` still
+// carries the per-request detail the recent-activity list needs; these buckets
+// carry the totals a 24-hour chart cannot get from a bounded sample.
+export interface UsageEventHour {
+  startedAt: string;
+  tokens: number;
+  requests: number;
+  measuredTokens: boolean;
+  regularInputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  measuredBreakdown: boolean;
+}
+
 export interface UsageEvent {
   meteringVersion?: number;
   at: string;
@@ -544,6 +560,7 @@ export interface UsageEvent {
   billedOutputTokens?: number;
   /** Reasoning tokens (silent thinking) included in outputTokens. */
   reasoningTokens?: number;
+  reasoningStreamed?: boolean;
   totalTokens?: number;
   estimatedInputTokens?: number;
   retries?: number;
@@ -620,13 +637,37 @@ export interface OperationEvent {
   error?: string;
 }
 
-export type HarnessId = "codex" | "dsh" | "gemini" | "cursor" | "claude" | "openclaw";
+export type HarnessId =
+  | "codex"
+  | "dsh"
+  | "gemini"
+  | "cursor"
+  | "claude"
+  | "openclaw"
+  // Document-configured harnesses: published into rather than installed as.
+  // See `src/routed-harness-catalog.mjs`.
+  | "opencode"
+  | "pi"
+  | "omp"
+  | "commandcode"
+  | "hermes";
 export type HarnessSurface = "app" | "terminal";
 
 export interface HarnessDescriptor {
   id: HarnessId;
   displayName: string;
-  ownership: "openai" | "deepseek" | "google" | "cursor" | "anthropic" | "openclaw";
+  ownership:
+    | "openai"
+    | "deepseek"
+    | "google"
+    | "cursor"
+    | "anthropic"
+    | "openclaw"
+    | "opencode"
+    | "pi"
+    | "omp"
+    | "commandcode"
+    | "nousresearch";
   description: string;
   cliInstalled: boolean;
   cliVersion?: string;
@@ -634,6 +675,10 @@ export interface HarnessDescriptor {
   configured: boolean;
   canInstall: boolean;
   installRequirement?: string;
+  /** Whether this client is installed and has an updater this router can run. */
+  canUpdate?: boolean;
+  /** The command an update would run, e.g. `opencode upgrade`. */
+  updateCommand?: string;
   publicOrigin?: string;
   agentConfigured?: boolean;
   appConfigured?: boolean;
@@ -705,6 +750,11 @@ export interface ContextSessionsSnapshot {
     claude: number;
     gemini: number;
     openclaw: number;
+    opencode: number;
+    pi: number;
+    omp: number;
+    commandcode: number;
+    hermes: number;
     archived: number;
   };
 }
@@ -786,8 +836,12 @@ export interface RouterControlApi {
   probeAgentBridge(bridgeId: AgentBridgeId): Promise<unknown>;
   loginAgentBridge(bridgeId: AgentBridgeId): Promise<unknown>;
   setupHarness(harnessId: HarnessId, hostname?: string): Promise<unknown>;
+  /** Move one routed client, or every installed one ("all"), to its latest release. */
+  updateHarness(harnessId: HarnessId | "all"): Promise<unknown>;
   prepareCursorTunnel(): Promise<unknown>;
   connectCursor(hostname?: string): Promise<unknown>;
+  disconnectCursor(): Promise<unknown>;
+  disconnectHarness(harnessId: HarnessId): Promise<unknown>;
   openHarnessSession(harnessId: HarnessId, sessionId: string, surface: HarnessSurface, model?: string): Promise<unknown>;
   openExternal(url: string): Promise<void>;
   onNavigation?(listener: (request: {

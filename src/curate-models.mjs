@@ -102,6 +102,9 @@ if (Object.keys(REQUEST_PROFILE_DESCRIPTIONS).some((profile) => !curatableReques
   throw new Error("Curatable request-profile descriptions are out of sync.");
 }
 
+// Input modalities a published route may declare; mirrors the registry check.
+const SUPPORTED_INPUT_MODALITIES = ["text", "image"];
+
 // Codex compacts at this fraction of the declared window.
 const AUTO_COMPACT_RATIO = 0.85;
 
@@ -115,6 +118,13 @@ const AUTO_COMPACT_RATIO = 0.85;
 // prompt tokens errs high on purpose, so against an eight-times-too-small
 // threshold it lands above the compaction limit on turn after turn and the
 // session compacts forever without finishing anything (#266).
+// The picker text for an entry whose sizing or modalities came from the
+// provider's own catalog rather than a documented table or the default.
+export function advertisedModelDescription(providerId, fields) {
+  const named = fields.length === 2 ? `${fields[0]} and ${fields[1]}` : fields[0];
+  return `User-curated ${providerId} model; ${named} as advertised by the provider's catalog at curation time.`;
+}
+
 export function curatedSizing(contextLength) {
   if (!Number.isInteger(contextLength) || contextLength < 1) return undefined;
   return {
@@ -460,10 +470,12 @@ async function main() {
     }
   }
 
-  const inheritedProfile = uniformProviderFamilyRequestProfile(
-    CHECKED_IN_MODELS,
-    familyProviderIds,
-  );
+  // Zen Free mixes unrelated upstream models behind one anonymous catalog.
+  // Its two Muse Responses ids have a documented model-specific profile, so a
+  // checked-in Muse pin must not lend that profile to every other free model.
+  const inheritedProfile = providerId === "opencode-free"
+    ? undefined
+    : uniformProviderFamilyRequestProfile(CHECKED_IN_MODELS, familyProviderIds);
 
   // Which models exist is decided by the provider's own catalog endpoint.
   // Metadata comes from that catalog, the interactive user, or the narrow
@@ -522,7 +534,18 @@ async function main() {
     // Without this, scripted `--models` curation keeps the generic text-only
     // default even when OpenCode publishes attachment/image for the id.
     const documentedModalities = curatedModelInputModalities(providerId, id);
-    if (documentedModalities) {
+    // What the live catalog says about image input outranks the documented
+    // table the same way its context length does; both beat the text-only
+    // default, which is a guess.
+    // The registry publishes only text and image input (model-registry.mjs
+    // refuses any other value), while resellers advertise file, audio, and
+    // video as well. Keep the served answer for the inputs Codex can carry;
+    // a model that advertises none of them is treated as unsized here.
+    const advertisedModalities = (discovery.inputModalities?.[id] || [])
+      .filter((value) => SUPPORTED_INPUT_MODALITIES.includes(value));
+    if (advertisedModalities.length > 0) {
+      metadata.inputModalities = [...advertisedModalities];
+    } else if (documentedModalities) {
       metadata.inputModalities = [...documentedModalities];
     }
     // A documented window or effort ladder is not a conservative default, and
@@ -535,7 +558,19 @@ async function main() {
     let omitReasoningNote = Boolean(flagEfforts);
     const describe = () => {
       if (live?.description) return;
-      if (!documented && !documentedEfforts) return;
+      if (!documented && !documentedEfforts) {
+        // Nothing documented, but the provider's own catalog may have sized
+        // the model or named its input. The generic entry text calls its
+        // metadata a conservative default; that stops being true here.
+        const advertisedFields = [
+          advertised ? "context window" : undefined,
+          advertisedModalities.length > 0 ? "input modalities" : undefined,
+        ].filter(Boolean);
+        if (advertisedFields.length > 0) {
+          metadata.description = advertisedModelDescription(providerId, advertisedFields);
+        }
+        return;
+      }
       const description = curatedModelDescription(providerId, id, {
         omitContextNote,
         omitReasoningNote,

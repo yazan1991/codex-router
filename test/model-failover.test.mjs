@@ -100,6 +100,34 @@ test("classifyRoutedFailure recognizes the observed Z.ai five-hour window messag
   });
 });
 
+test("classifyRoutedFailure recognizes the documented Z.ai weekly and monthly window message", () => {
+  // zai 1310: "Weekly/Monthly Limit Exhausted. Your limit will reset at ..." --
+  // a quota window that names neither "usage" nor "quota", so the rest of the
+  // vocabulary does not catch it and the turn keeps its 429 instead of
+  // failing over.
+  const verdict = classifyRoutedFailure({
+    status: 429,
+    bodyText: quotaBody("Weekly Limit Exhausted. Your limit will reset at 2026-08-15 13:00:00."),
+    now: NOW,
+  });
+  assert.equal(verdict.swap, true);
+  assert.equal(verdict.reason, "out_of_usage");
+  assert.ok(verdict.until, "the named reset becomes the cooldown window");
+});
+
+test("classifyRoutedFailure swaps on a lapsed Z.ai coding or enterprise package", () => {
+  // zai 1309/1314: renewal restores access -- time does not, and neither does a
+  // fresh key. Still an exhausted plan every other provider can answer.
+  const verdict = classifyRoutedFailure({
+    status: 429,
+    bodyText: quotaBody(
+      "Your GLM Coding Plan package has expired and is temporarily unavailable. You can resume using it after renewing the subscription.",
+    ),
+    now: NOW,
+  });
+  assert.deepEqual(verdict, { swap: true, reason: "out_of_usage" });
+});
+
 test("classifyRoutedFailure honours a reset time the provider named in the body", () => {
   // Z.ai sends no `Retry-After`; the window is a sentence. Without this the
   // exhausted plan was re-attempted on every turn for the whole window.
@@ -545,14 +573,6 @@ test("rankFailoverCandidates returns nothing rather than something unsuitable", 
   assert.deepEqual(rankFailoverCandidates([model("zai-coding/glm-5.2", "zai-coding")], { from: FROM }), []);
   assert.deepEqual(rankFailoverCandidates([], { from: FROM }), []);
   assert.deepEqual(rankFailoverCandidates(undefined, { from: FROM }), []);
-});
-
-test("rankFailoverCandidates never turns a failure into a browser-automation turn", () => {
-  const browser = model("chatgpt-web/light", "chatgpt-web", { contextWindow: 41_000 });
-  assert.deepEqual(
-    rankFailoverCandidates([browser], { from: FROM, chain: [browser.slug] }),
-    [],
-  );
 });
 
 test("a named chain is used verbatim, minus entries this build cannot route to", () => {
