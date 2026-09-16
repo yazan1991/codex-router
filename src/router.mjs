@@ -280,6 +280,12 @@ import {
 } from "./fetch-transport.mjs";
 import { grokStreamStallMs, grokTransportIdleTimeoutMs } from "./grok-stream-timeouts.mjs";
 import { handleResponsesWebSocketUpgrade } from "./responses-websocket.mjs";
+import {
+  directResponsesBody,
+  directResponsesHeaders,
+  directResponsesTarget,
+  isDirectResponsesProvider,
+} from "./direct-responses-provider.mjs";
 
 installStableFetchTransport();
 
@@ -2910,9 +2916,9 @@ function compactionAttempts(route, aged, searchContract, { allowFailover = true 
   const settings = readFailoverSettings();
   if (!settings.enabled) return [route];
   const candidates = rankFailoverCandidates(
-    selectedConfiguredListedModels().filter(
-      (model) => !readHiddenModels().has(model.slug),
-    ),
+    selectedConfiguredListedModels().filter((model) => (
+      !readHiddenModels().has(model.slug) && !isDirectResponsesProvider(providerForModel(model))
+    )),
     {
       from: route,
       // The transcript being summarized is nearly all of the request, so its
@@ -4089,7 +4095,9 @@ function logImageRejectionRetry(route, path, attempt, stats) {
 function failoverCandidates({ route, agedInput, flattenedNamespaces, searchContract, chain }) {
   const hidden = readHiddenModels();
   return rankFailoverCandidates(
-    selectedConfiguredListedModels().filter((model) => !hidden.has(model.slug)),
+    selectedConfiguredListedModels().filter((model) => (
+      !hidden.has(model.slug) && !isDirectResponsesProvider(providerForModel(model))
+    )),
     {
       from: route,
       // Context fit is checked after rebuilding the request for each
@@ -4121,7 +4129,9 @@ function subagentTransportFailoverCandidates({ request, route, agedInput, search
   if (subagentEligibility(route)) return [];
   const hidden = readHiddenModels();
   let ranked = rankSubagentCandidates(
-    selectedConfiguredListedModels().filter((model) => !hidden.has(model.slug)),
+    selectedConfiguredListedModels().filter((model) => (
+      !hidden.has(model.slug) && !isDirectResponsesProvider(providerForModel(model))
+    )),
     {
       chain,
       requiredCapabilities: [
@@ -4333,6 +4343,7 @@ async function handleResponses(request, response, requestUrl) {
   let clientGone = false;
   let requestedModel = "";
   let route;
+  let directResponses = false;
   let upstreamRetries;
   let upstreamStatus;
   let upstreamLatencyMs;
@@ -4478,6 +4489,7 @@ async function handleResponses(request, response, requestUrl) {
       model: route?.slug || requestedModel || undefined,
       ...activityMetadataFromHeaders(request.headers),
     });
+    directResponses = route ? isDirectResponsesProvider(providerForModel(route)) : false;
     diagnostics.contextBytes = grokOauthIngressContextBytes(payload, route);
     if (offersGrokOauthServiceTier(route)) diagnostics.requestedServiceTier = payload.service_tier;
     const compactV1 = /\/responses\/compact$/.test(requestUrl.pathname);
@@ -4529,7 +4541,7 @@ async function handleResponses(request, response, requestUrl) {
       return;
     }
 
-    if (route && (compactV1 || compactV2)) {
+    if (route && !directResponses && (compactV1 || compactV2)) {
       const compaction = await handleRoutedCompaction(
         request,
         response,
@@ -4617,7 +4629,12 @@ async function handleResponses(request, response, requestUrl) {
         ...activityMetadataFromHeaders(request.headers),
       });
     };
-    if (route) {
+    if (route && directResponses) {
+      const provider = providerForModel(route);
+      target = directResponsesTarget(provider, requestUrl.pathname, requestUrl.search);
+      headers = directResponsesHeaders(request.headers);
+      routedBody = directResponsesBody(payload, route);
+    } else if (route) {
       // Resolve the selected route's search contract once, before encrypted
       // handoff normalization or any other external work. A later failover may
       // not reintroduce ambient search that this route never advertised.
@@ -4794,7 +4811,7 @@ async function handleResponses(request, response, requestUrl) {
     // live capability contract as every fallback. This catches unsupported
     // search history and sidecar changes after normalization before any
     // provider-bound bytes leave the router.
-    if (route) {
+    if (route && !directResponses) {
       assertRoutedSearchContract(route, builtSearchMode, searchContract);
     }
     let { response: upstream, retries } = await fetchWithRetry(
@@ -4827,7 +4844,7 @@ async function handleResponses(request, response, requestUrl) {
     // and the error translation below both need it, and it can only be read
     // once. Nothing is relayed either way, so reading it is free.
     let failedBodyText;
-    if (route && !upstream.ok) {
+    if (route && !directResponses && !upstream.ok) {
       failedBodyText = await boundedResponseText(
         upstream,
         MAX_BUFFERED_RESPONSE_BYTES,
@@ -4975,7 +4992,7 @@ async function handleResponses(request, response, requestUrl) {
     // recorded earlier: a quota that refilled early, a limit the operator
     // raised, or a reset time the provider got wrong all end the same way, and
     // a real answer is better evidence than anything on disk.
-    if (route && upstream.ok) clearProviderCooldown(route.provider);
+    if (route && !directResponses && upstream.ok) clearProviderCooldown(route.provider);
     // The same rule for the native reviewer. Any answer at all clears the
     // window -- including a `deny`, which is a successful HTTP 200 carrying a
     // decision and must never be read as the provider failing (#787).
@@ -5006,6 +5023,22 @@ async function handleResponses(request, response, requestUrl) {
           }
         }
       }
+    if (route && directResponses && !upstream.ok) {
+      await pipeResponse(upstream, response, HOP_BY_HOP_HEADERS);
+      recordUsageEvent({
+        model: route.slug,
+        provider: canonicalProviderId(route.provider),
+        status: upstream.status,
+        durationMs: Date.now() - startedAt,
+        responseStartMs: upstreamLatencyMs,
+      });
+      observeSubagentOutcome(request, route, upstream.status);
+      finalStatus = upstream.status;
+      activityStatus = upstream.status;
+      usageRecorded = true;
+      return;
+    }
+
     }
     // Gateway error bodies leak LiteLLM's internal exception chain, which
     // reads like a router bug. Rewrite them to name the provider that failed.
