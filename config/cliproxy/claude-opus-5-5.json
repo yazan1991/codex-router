@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "slug": "cliproxy/claude-opus-5-5",
+      "gatewayModel": "cliproxy-claude-opus-5-5",
+      "upstreamModel": "claude-opus-5-5",
+      "provider": "cliproxy",
+      "listed": true,
+      "displayName": "Claude Opus 5.5 (CLIProxy)",
+      "description": "Claude Opus 5.5 through the checked-in CLIProxy route.",
+      "priority": 16,
+      "defaultEffort": "high",
+      "reasoningLevels": [
+        { "effort": "low", "description": "Faster reasoning" },
+        { "effort": "medium", "description": "Balanced reasoning" },
+        { "effort": "high", "description": "Deep reasoning" },
+        { "effort": "xhigh", "description": "Extended reasoning" },
+        { "effort": "max", "description": "Maximum reasoning depth" }
+      ],
+      "contextWindow": 1000000,
+      "autoCompact": 900000,
+      "inputModalities": ["text", "image"],
+      "multiAgentVersion": "v1",
+      "compHash": "cliproxy-claude-opus-5-5-v1"
+    }
+  ]
+}

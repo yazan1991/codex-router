@@ -31,6 +31,8 @@ test("CLIProxy native GPT parity remains narrowly scoped", () => {
     "cliproxy/gpt-5.6-terra",
     "cliproxy/gpt-5.6-luna",
     "cliproxy/gpt-6-astra",
+    "cliproxy/gpt-6-sol",
+    "cliproxy/gpt-6-luna",
   ]) {
     assert.ok(catalog.includes(slug), `missing parity route: ${slug}`);
   }
