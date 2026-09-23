@@ -448,6 +448,7 @@ const NATIVE_IMAGE_PATHS = new Set([
   "/v1/images/generations",
 ]);
 const NATIVE_SEARCH_PATHS = new Set(["/alpha/search", "/v1/alpha/search"]);
+const AGENT_PAYLOAD_RELAY_TOOL = "relay_external_agent_payload";
 const configuredAgentPayloadCacheTtlMs = Number(
   process.env.MODEL_ROUTER_AGENT_PAYLOAD_CACHE_TTL_MS ||
     process.env.CODEX_ROUTER_AGENT_PAYLOAD_CACHE_TTL_MS ||
@@ -1536,6 +1537,76 @@ function nativeAgentRelayModel() {
   }
 }
 
+
+function parseRelayedAgentPayload(payload) {
+  const output = payload?.item
+    ? [payload.item]
+    : Array.isArray(payload?.output)
+      ? payload.output
+      : Array.isArray(payload?.response?.output)
+        ? payload.response.output
+        : [];
+  const call = output.find(
+    (item) => item?.type === "function_call" && item.name === AGENT_PAYLOAD_RELAY_TOOL,
+  );
+  if (!call) return undefined;
+  return parseRelayedAgentArguments(call.arguments);
+}
+
+function parseRelayedAgentArguments(value) {
+  try {
+    const args = typeof value === "string" ? JSON.parse(value) : value;
+    return typeof args?.payload === "string" ? args.payload : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseRelayedAgentPayloadSse(bytes) {
+  const events = bytes.toString("utf8").split(/\r?\n\r?\n/);
+  const relayItems = new Set();
+  let argumentDeltas = "";
+  for (const rawEvent of events) {
+    const data = rawEvent
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n")
+      .trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const event = JSON.parse(data);
+      if (
+        event?.type === "response.output_item.added" &&
+        event.item?.type === "function_call" &&
+        event.item.name === AGENT_PAYLOAD_RELAY_TOOL
+      ) {
+        if (event.item.id) relayItems.add(event.item.id);
+        if (event.item.call_id) relayItems.add(event.item.call_id);
+      }
+      const relatedArgumentEvent =
+        relayItems.size === 0 ||
+        relayItems.has(event?.item_id) ||
+        relayItems.has(event?.call_id);
+      if (
+        event?.type === "response.function_call_arguments.delta" &&
+        relatedArgumentEvent &&
+        typeof event.delta === "string"
+      ) argumentDeltas += event.delta;
+      if (
+        event?.type === "response.function_call_arguments.done" &&
+        relatedArgumentEvent
+      ) {
+        const completed = parseRelayedAgentArguments(event.arguments);
+        if (completed !== undefined) return completed;
+      }
+      const plaintext = parseRelayedAgentPayload(event);
+      if (plaintext !== undefined) return plaintext;
+    } catch {}
+  }
+  return parseRelayedAgentArguments(argumentDeltas);
+}
+
 function nativeRelayContext(request) {
   const headers = nativeHeaders(request);
   const authorization =
@@ -1800,6 +1871,40 @@ function waitForAgentPayloadRelay(pending, signal) {
   });
 }
 
+async function relayEncryptedAgentPayloadNative(request, item, encrypted, signal) {
+  const { cacheScope, headers } = nativeRelayContext(request);
+  const key = agentPayloadCacheKey(encrypted, cacheScope);
+  const cached = cachedAgentPayload(key);
+  if (cached !== undefined) return cached;
+  if (agentRelayFailureActive(key)) throw nativeAgentRelayRateLimitError();
+  const pending = agentPayloadCacheInFlight.get(key);
+  if (pending) {
+    agentPayloadCacheMetrics.coalesced += 1;
+    return waitForAgentPayloadRelay(pending, signal);
+  }
+  const controller = new AbortController();
+  const operation = {
+    controller,
+    promise: undefined,
+    settled: false,
+    waiters: 0,
+  };
+  operation.promise = relayEncryptedAgentPayloadOnce(
+    item,
+    key,
+    headers,
+    controller.signal,
+  ).finally(() => {
+    operation.settled = true;
+    if (agentPayloadCacheInFlight.get(key) === operation) {
+      agentPayloadCacheInFlight.delete(key);
+    }
+  });
+  operation.promise.catch(() => {});
+  agentPayloadCacheInFlight.set(key, operation);
+  return waitForAgentPayloadRelay(operation, signal);
+}
+
 async function relayEncryptedAgentPayload(request, item, encrypted, signal, route) {
   let routedTransport;
   try {
@@ -1817,13 +1922,14 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal, rout
     }
     throw error;
   }
-  const relay = routedTransport
-    ? {
-        ...routedTransport,
-        mode: "routed",
-        model: routedTransport.gatewayModel,
-      }
-    : nativeRelayContext(request);
+  if (!routedTransport) {
+    return relayEncryptedAgentPayloadNative(request, item, encrypted, signal);
+  }
+  const relay = {
+    ...routedTransport,
+    mode: "routed",
+    model: routedTransport.gatewayModel,
+  };
   const key = agentPayloadCacheKey(encrypted, relay.cacheScope);
   const cached = cachedAgentPayload(key);
   if (cached !== undefined) return cached;
