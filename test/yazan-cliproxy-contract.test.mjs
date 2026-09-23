@@ -103,7 +103,7 @@ test("Codex++ routed collaboration relay remains opt-in and transport-isolated",
   assert.match(router, /isRoutedAgentRelayRequest\(request\.headers\)/);
   assert.doesNotMatch(relayTransport, /nativeTarget|nativeRelayContext/);
 
-  assert.match(router, /routedTransport[\s\S]*?: nativeRelayContext\(request\)/);
+  assert.match(router, /if \(!routedTransport\) \{[\s\S]*?relayEncryptedAgentPayloadNative\(request, item, encrypted, signal\)/);
   assert.doesNotMatch(
     router,
     /relayAgentPayloadOnce\([\s\S]*?catch[\s\S]*?nativeRelayContext\(request\)/,
