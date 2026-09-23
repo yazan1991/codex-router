@@ -1996,14 +1996,21 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal, rout
     settled: false,
     waiters: 0,
   };
-  operation.promise = relayAgentPayloadOnce({
-    item,
-    model: relay.model,
-    url: relay.url,
-    headers: relay.headers,
-    signal: controller.signal,
-    mode: relay.mode,
-  })
+  operation.promise = (relay.mode === "routed"
+    ? relayAgentPayloadOnce({
+        item,
+        model: relay.model,
+        url: relay.url,
+        headers: relay.headers,
+        signal: controller.signal,
+        mode: relay.mode,
+      })
+    : relayEncryptedAgentPayloadOnce(
+        item,
+        key,
+        relay.headers,
+        controller.signal,
+      ))
     .then((plaintext) => {
       rememberAgentPayload(key, plaintext);
       return plaintext;
