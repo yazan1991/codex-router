@@ -69,6 +69,7 @@ import {
 import { relayCommandCodeGenerate } from "./commandcode-relay.mjs";
 import { VERSION } from "./version.mjs";
 import { installStableFetchTransport } from "./fetch-transport.mjs";
+import { readCheckedInProviderAuthoritySnapshot } from "./provider-relay-transport.mjs";
 import { zaiCacheUsageTransform } from "./zai-cache-usage.mjs";
 import {
   buildNamespaceLookupsFromTools,
@@ -1879,6 +1880,21 @@ async function handleRequest(request, response) {
       await dispatcher?.close().catch(() => undefined);
     }
     return;
+  }
+
+  const expectedRelayAuthority = request.headers["x-codex-relay-authority"];
+  if (expectedRelayAuthority) {
+    if (normalized.provider.id !== "cliproxy") {
+      const error = new Error("Routed collaboration relay authority is valid only for CLIProxy.");
+      error.status = 403;
+      throw error;
+    }
+    readCheckedInProviderAuthoritySnapshot(
+      normalized.provider,
+      normalized.endpoint,
+      undefined,
+      { expectedAuthority: expectedRelayAuthority },
+    );
   }
 
   // Resolved against the endpoint, not the provider: a per-model endpoint keeps
