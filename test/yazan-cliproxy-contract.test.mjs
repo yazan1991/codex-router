@@ -91,7 +91,9 @@ test("Codex++ routed collaboration relay remains opt-in and transport-isolated",
   assert.match(relayTransport, /if \(!config\.enabled\) return undefined/);
   assert.match(relayTransport, /providerId !== config\.providerId/);
   assert.match(relayTransport, /provider\.protocol !== "openai-responses"/);
-  assert.match(relayTransport, /provider\.generic !== true/);
+  assert.match(relayTransport, /provider\.generic === true/);
+  assert.match(relayTransport, /readGenericProviderAuthoritySnapshot/);
+  assert.match(relayTransport, /readCheckedInProviderAuthoritySnapshot/);
   assert.match(relayTransport, /requires a loopback API-forwarder base URL/);
   assert.match(relayTransport, /apiForwarderBaseUrl/);
   assert.match(relayTransport, /PORTS\.router/);
