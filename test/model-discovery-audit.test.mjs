@@ -200,6 +200,7 @@ test("the discovery workflow keeps live secrets away from pull-request code", ()
   for (const provider of PROVIDERS.values()) {
     if (
       provider.variantOf ||
+      provider.id === "cliproxy" || // operator-local proxy; never inject its credential into GitHub discovery
       provider.credential?.resolver ||
       providerCatalogKind(provider) !== "models-endpoint" ||
       provider.authMode === "anonymous" ||

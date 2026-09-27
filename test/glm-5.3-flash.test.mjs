@@ -17,6 +17,7 @@ const { MODEL_BY_SLUG } = await import("../src/model-registry.mjs");
 // candidate until its own current-head router-level exact-route certificate is
 // recorded; presence in this array is not that proof.
 const ROUTES = [
+  ["cliproxy/glm-5.3-flash", "glm-5.3-flash", undefined, 400_000],
   // Command Code shipped with neither the 400K threshold nor a clamp profile,
   // which is what being absent from this inventory bought it: the provider's
   // house 900K compaction value, and a pre-0.143 Codex sending `xhigh` --

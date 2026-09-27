@@ -57,6 +57,16 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "clinepass/qwen3.7-max",
       "clinepass/qwen3.7-plus",
       "clinepass/qwen3.8-max",
+      "cliproxy/claude-opus-5-5",
+      "cliproxy/deepseek-v4.1-flash",
+      "cliproxy/glm-5.3-flash",
+      "cliproxy/gpt-5.6-luna",
+      "cliproxy/gpt-5.6-sol",
+      "cliproxy/gpt-5.6-terra",
+      "cliproxy/gpt-6-astra",
+      "cliproxy/gpt-6-luna",
+      "cliproxy/gpt-6-sol",
+      "cliproxy/qwen3.8-flash",
       "commandcode/deepseek-v4-flash",
       "commandcode/deepseek-v4-pro",
       "commandcode/deepseek-v4.1-flash",
@@ -672,6 +682,12 @@ test("provider registry exposes configured API and OAuth model families", () => 
     assert.deepEqual(MODEL_BY_SLUG.get(slug).searchTool, { mode: "hosted" });
   }
   const standaloneSearchSlugs = new Set([
+    "cliproxy/gpt-5.6-luna",
+    "cliproxy/gpt-5.6-sol",
+    "cliproxy/gpt-5.6-terra",
+    "cliproxy/gpt-6-astra",
+    "cliproxy/gpt-6-luna",
+    "cliproxy/gpt-6-sol",
     "deepseek/deepseek-v4-flash",
     "deepseek/deepseek-v4-flash-vision-exp",
     "opencode-go/deepseek-v4-flash",
@@ -691,6 +707,12 @@ test("provider registry exposes configured API and OAuth model families", () => 
   ).map((model) => model.slug);
   assert.deepEqual(originalDetailSlugs.sort(), [
     "anthropic-api/claude-opus-4.8",
+    "cliproxy/gpt-5.6-luna",
+    "cliproxy/gpt-5.6-sol",
+    "cliproxy/gpt-5.6-terra",
+    "cliproxy/gpt-6-astra",
+    "cliproxy/gpt-6-luna",
+    "cliproxy/gpt-6-sol",
     "deepseek/deepseek-v4-flash-vision-exp",
     "grok-api/grok-4.5",
     "grok-api/grok-4.7",
