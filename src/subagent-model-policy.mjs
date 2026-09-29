@@ -9,6 +9,12 @@ const REVIEWED_SUBAGENT_ROUTE_METADATA = new Map([
   ["chatgpt-web/high", Object.freeze({ provider: "chatgpt-web", upstreamModel: "chatgpt-web/high", subagentFamilyId: "chatgpt-web/sol", subagentTier: 2 })],
   ["chatgpt-web/extra-high", Object.freeze({ provider: "chatgpt-web", upstreamModel: "chatgpt-web/extra-high", subagentFamilyId: "chatgpt-web/sol", subagentTier: 3 })],
   ["chatgpt-web/pro", Object.freeze({ provider: "chatgpt-web", upstreamModel: "chatgpt-web/pro", subagentFamilyId: "chatgpt-web/sol", subagentTier: 4 })],
+  ["cliproxy/gpt-5.6-luna", Object.freeze({ provider: "cliproxy", upstreamModel: "gpt-5.6-luna", subagentFamilyId: "cliproxy/gpt", subagentTier: 0 })],
+  ["cliproxy/gpt-5.6-terra", Object.freeze({ provider: "cliproxy", upstreamModel: "gpt-5.6-terra", subagentFamilyId: "cliproxy/gpt", subagentTier: 1 })],
+  ["cliproxy/gpt-5.6-sol", Object.freeze({ provider: "cliproxy", upstreamModel: "gpt-5.6-sol", subagentFamilyId: "cliproxy/gpt", subagentTier: 2 })],
+  ["cliproxy/gpt-6-luna", Object.freeze({ provider: "cliproxy", upstreamModel: "gpt-6-luna", subagentFamilyId: "cliproxy/gpt", subagentTier: 0 })],
+  ["cliproxy/gpt-6-sol", Object.freeze({ provider: "cliproxy", upstreamModel: "gpt-6-sol", subagentFamilyId: "cliproxy/gpt", subagentTier: 2 })],
+  ["cliproxy/gpt-6.1-sol", Object.freeze({ provider: "cliproxy", upstreamModel: "gpt-6.1-sol", subagentFamilyId: "cliproxy/gpt", subagentTier: 2 })],
 ]);
 
 export function reviewedSubagentRouteMetadata(model) {
