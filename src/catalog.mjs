@@ -743,6 +743,7 @@ export function routedModel(template, model, behaviorTemplate = template) {
     String(model.slug) === "cliproxy/gpt-5.6-terra" ||
     String(model.slug) === "cliproxy/gpt-5.6-luna" ||
     String(model.slug) === "cliproxy/gpt-6-astra" ||
+    String(model.slug) === "cliproxy/gpt-6.1-sol" ||
     String(model.slug) === "cliproxy/gpt-6-sol" ||
     String(model.slug) === "cliproxy/gpt-6-luna";
 
