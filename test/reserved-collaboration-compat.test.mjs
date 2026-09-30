@@ -23,14 +23,22 @@ test("CLIProxy Sol 6.1 aliases collaboration to agents without changing child sc
   assert.equal(payload.tools[0].name, "collaboration");
 });
 
-test("reserved collaboration alias is bounded to CLIProxy Sol 6.1 Responses", () => {
-  const payload = { tools: [{ type: "namespace", name: "collaboration", tools: [] }] };
-  assert.strictEqual(normalizeReservedCollaborationRequest(payload, {
-    model: { provider: "cliproxy", upstreamModel: "gpt-6-luna" }, route: "/responses",
-  }), payload);
-  assert.strictEqual(normalizeReservedCollaborationRequest(payload, {
+test("reserved collaboration alias covers the managed routed GPT workforce only", () => {
+  for (const upstreamModel of ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]) {
+    const payload = { tools: [{ type: "namespace", name: "collaboration", tools: [] }] };
+    const normalized = normalizeReservedCollaborationRequest(payload, {
+      model: { provider: "cliproxy", upstreamModel },
+      route: "/responses",
+    });
+    assert.equal(normalized.tools[0].name, "agents");
+  }
+  const unrelated = { tools: [{ type: "namespace", name: "collaboration", tools: [] }] };
+  assert.strictEqual(normalizeReservedCollaborationRequest(unrelated, {
+    model: { provider: "cliproxy", upstreamModel: "deepseek-v4-pro" }, route: "/responses",
+  }), unrelated);
+  assert.strictEqual(normalizeReservedCollaborationRequest(unrelated, {
     model: sol, route: "/chat/completions",
-  }), payload);
+  }), unrelated);
 });
 
 test("reserved collaboration alias fails closed on an existing agents namespace", () => {

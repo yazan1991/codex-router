@@ -1,6 +1,12 @@
+const ROUTED_GPT_RESERVED_COLLABORATION_MODELS = new Set([
+  "gpt-6-luna",
+  "gpt-6.1-sol",
+  "gpt-6-astra",
+]);
+
 function usesReservedCollaborationAlias(model, route) {
   return model?.provider === "cliproxy" &&
-    model?.upstreamModel === "gpt-6.1-sol" &&
+    ROUTED_GPT_RESERVED_COLLABORATION_MODELS.has(model?.upstreamModel) &&
     route === "/responses";
 }
 

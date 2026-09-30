@@ -2485,7 +2485,9 @@ function restoreAzureCollaborationAlias(item, lookups, sessionModel) {
   const model = sessionModelSlug(sessionModel);
   const aliasedProvider =
     model?.startsWith("azure-kmamc/") ||
-    model === "cliproxy/gpt-6.1-sol";
+    model === "cliproxy/gpt-6-luna" ||
+    model === "cliproxy/gpt-6.1-sol" ||
+    model === "cliproxy/gpt-6-astra";
   if (!aliasedProvider || item?.namespace !== "agents") return item;
   const owners = lookups.bareToNamespaces.get(item.name);
   if (!owners?.has("collaboration") || owners.has("agents")) return item;
