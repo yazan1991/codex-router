@@ -15,7 +15,7 @@ export const ROUTED_AGENT_RELAY_FLAG = "CODEX_PLUS_ROUTED_AGENT_RELAY";
 export const ROUTED_AGENT_RELAY_MODEL_FLAG = "CODEX_PLUS_ROUTED_AGENT_RELAY_MODEL";
 export const ROUTED_AGENT_RELAY_MARKER_HEADER = "X-Codex-Routed-Agent-Relay";
 export const ROUTED_AGENT_RELAY_AUTHORITY_HEADER = "X-Codex-Relay-Authority";
-export const DEFAULT_ROUTED_AGENT_RELAY_MODEL = "cliproxy/gpt-5.6-sol";
+export const DEFAULT_ROUTED_AGENT_RELAY_MODEL = "cliproxy/gpt-6.1-sol";
 
 export function isRoutedAgentRelayRequest(headers = {}) {
   return String(headers[ROUTED_AGENT_RELAY_MARKER_HEADER.toLowerCase()] || "") === "1";
