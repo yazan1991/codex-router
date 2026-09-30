@@ -78,9 +78,15 @@ test("managed CLIProxy GPT agents wire calls restore the configured collaboratio
     ["collaboration", new Set(["spawn_agent", "wait_agent"])],
   ]));
   for (const sessionModel of [
+    "cliproxy/gpt-5.6-luna",
+    "cliproxy/gpt-5.6-sol",
+    "cliproxy/gpt-5.6-sol-1m",
+    "cliproxy/gpt-5.6-terra",
     "cliproxy/gpt-6-luna",
+    "cliproxy/gpt-6-sol",
     "cliproxy/gpt-6.1-sol",
     "cliproxy/gpt-6-astra",
+    "cliproxy/gpt-future-canary",
   ]) {
     const call = {
       type: "function_call",

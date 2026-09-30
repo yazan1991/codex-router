@@ -24,7 +24,11 @@ test("CLIProxy Sol 6.1 aliases collaboration to agents without changing child sc
 });
 
 test("reserved collaboration alias covers the managed routed GPT workforce only", () => {
-  for (const upstreamModel of ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"]) {
+  for (const upstreamModel of [
+    "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-sol-1m", "gpt-5.6-terra",
+    "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra",
+    "gpt-future-canary",
+  ]) {
     const payload = { tools: [{ type: "namespace", name: "collaboration", tools: [] }] };
     const normalized = normalizeReservedCollaborationRequest(payload, {
       model: { provider: "cliproxy", upstreamModel },
