@@ -73,6 +73,26 @@ test("Azure plaintext collaboration output carries Codex's explicit plaintext ma
   );
 });
 
+test("CLIProxy Sol 6.1 agents wire calls restore the configured collaboration identity", () => {
+  const lookups = buildNamespaceLookups(new Map([
+    ["collaboration", new Set(["spawn_agent", "wait_agent"])],
+  ]));
+  const call = {
+    type: "function_call",
+    namespace: "agents",
+    name: "wait_agent",
+    call_id: "call_sol_wait",
+    arguments: '{"target":"probe"}',
+  };
+  const event = { type: "response.output_item.done", item: call };
+  const normalized = rewriteNamespaceResponsePayload(
+    event,
+    lookups,
+    "cliproxy/gpt-6.1-sol",
+  );
+  assert.deepEqual(normalized.item, { ...call, namespace: "collaboration" });
+});
+
 test("Azure agents wire calls restore the configured collaboration identity", () => {
   const lookups = buildNamespaceLookups(new Map([
     ["collaboration", new Set(["spawn_agent", "wait_agent"])],

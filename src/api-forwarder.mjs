@@ -1,4 +1,5 @@
 import { normalizeAzureOpenAIResponsesRequest } from "./azure-openai-compat.mjs";
+import { normalizeReservedCollaborationRequest } from "./reserved-collaboration-compat.mjs";
 import http from "node:http";
 import {
   requiresReasoningContentOnToolCalls,
@@ -1130,6 +1131,7 @@ function normalizeBody(buffer, contentType, route) {
     }
     payload = normalizeOpenAIRequest(payload);
     payload = normalizeAzureOpenAIResponsesRequest(payload, { providerId: model.provider, route });
+    payload = normalizeReservedCollaborationRequest(payload, { model, route });
     if (usesDeepSeekResponses(model) && payload.reasoning.effort !== "none" &&
       (payload.tool_choice === "required" || (payload.tool_choice?.type === "function" &&
         typeof payload.tool_choice.name === "string" && payload.tool_choice.name) ||

@@ -2483,7 +2483,10 @@ function markAzurePlaintextCollaborationCall(item, sessionModel) {
 
 function restoreAzureCollaborationAlias(item, lookups, sessionModel) {
   const model = sessionModelSlug(sessionModel);
-  if (!model?.startsWith("azure-kmamc/") || item?.namespace !== "agents") return item;
+  const aliasedProvider =
+    model?.startsWith("azure-kmamc/") ||
+    model === "cliproxy/gpt-6.1-sol";
+  if (!aliasedProvider || item?.namespace !== "agents") return item;
   const owners = lookups.bareToNamespaces.get(item.name);
   if (!owners?.has("collaboration") || owners.has("agents")) return item;
   return { ...item, namespace: "collaboration" };
