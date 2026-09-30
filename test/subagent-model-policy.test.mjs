@@ -50,6 +50,7 @@ test("reviewed metadata recognizes only exact CGW Sol route identities", () => {
 test("reviewed metadata recognizes exact CLIProxy GPT family identities and rejects forged upstreams", () => {
   assert.deepEqual(reviewedSubagentRouteMetadata({ slug: "cliproxy/gpt-6.1-sol", provider: "cliproxy", upstreamModel: "gpt-6.1-sol" }), { subagentFamilyId: "cliproxy/gpt", subagentTier: 2 });
   assert.deepEqual(reviewedSubagentRouteMetadata({ slug: "cliproxy/gpt-6-luna", provider: "cliproxy", upstreamModel: "gpt-6-luna" }), { subagentFamilyId: "cliproxy/gpt", subagentTier: 0 });
+  assert.deepEqual(reviewedSubagentRouteMetadata({ slug: "cliproxy/gpt-6-astra", provider: "cliproxy", upstreamModel: "gpt-6-astra" }), { subagentFamilyId: "cliproxy/gpt", subagentTier: 2 });
   assert.equal(reviewedSubagentRouteMetadata({ slug: "cliproxy/gpt-6.1-sol", provider: "cliproxy", upstreamModel: "gpt-6-sol" }), undefined);
 });
 

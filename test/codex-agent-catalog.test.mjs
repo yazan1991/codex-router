@@ -147,6 +147,17 @@ test("only registry-proven models receive routed agent definitions", () => {
   );
 });
 
+test("Astra routed agent is an escalation-only read-only advisor with dynamic effort", () => {
+  const definition = routedAgentDefinition({
+    slug: "cliproxy/gpt-6-astra",
+    displayName: "GPT 6 Astra (CLIProxy)",
+  });
+  assert.match(definition.contents, /escalation-only expert advisor/i);
+  assert.match(definition.contents, /^sandbox_mode = "read-only"$/m);
+  assert.match(definition.contents, /Do not use for routine work/i);
+  assert.equal(/model_reasoning_effort/.test(definition.contents), false);
+});
+
 test("a configured subagent effort rides along in the agent definition", () => {
   const withEffort = routedAgentDefinition(kimi, { effort: "max" });
   assert.match(withEffort.contents, /^model_reasoning_effort = "max"$/m);

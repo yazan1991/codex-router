@@ -15,6 +15,7 @@ const REVIEWED_SUBAGENT_ROUTE_METADATA = new Map([
   ["cliproxy/gpt-6-luna", Object.freeze({ provider: "cliproxy", upstreamModel: "gpt-6-luna", subagentFamilyId: "cliproxy/gpt", subagentTier: 0 })],
   ["cliproxy/gpt-6-sol", Object.freeze({ provider: "cliproxy", upstreamModel: "gpt-6-sol", subagentFamilyId: "cliproxy/gpt", subagentTier: 2 })],
   ["cliproxy/gpt-6.1-sol", Object.freeze({ provider: "cliproxy", upstreamModel: "gpt-6.1-sol", subagentFamilyId: "cliproxy/gpt", subagentTier: 2 })],
+  ["cliproxy/gpt-6-astra", Object.freeze({ provider: "cliproxy", upstreamModel: "gpt-6-astra", subagentFamilyId: "cliproxy/gpt", subagentTier: 2 })],
 ]);
 
 export function reviewedSubagentRouteMetadata(model) {
