@@ -227,6 +227,15 @@ test("routed models rewrite GPT identity text to the external model name", () =>
   assert.equal(model.multi_agent_version, "v2");
 });
 
+test("routed models publish an explicit Guardian review model override", () => {
+  const model = routedModel(template, {
+    ...grok,
+    autoReviewModelOverride: "cliproxy/gpt-6.1-sol",
+  });
+  assert.equal(model.auto_review_model_override, "cliproxy/gpt-6.1-sol");
+  assert.equal(routedModel(template, grok).auto_review_model_override, null);
+});
+
 test("routed models can borrow native behavior instructions without inheriting capabilities", () => {
   const behaviorTemplate = {
     ...template,

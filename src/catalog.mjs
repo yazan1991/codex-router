@@ -730,6 +730,13 @@ export function routedModel(template, model, behaviorTemplate = template) {
     // catalog entry advertises the same backend version as the parent. Models
     // opt in after their tool and encrypted-payload relay paths are verified.
     multi_agent_version: model.multiAgentVersion || "v1",
+    // Keep Guardian automatic approval review on the same routed provider when
+    // a model explicitly declares a reviewer override. This preserves the
+    // approval policy while avoiding an unrelated native-provider quota path.
+    auto_review_model_override:
+      typeof model.autoReviewModelOverride === "string" && model.autoReviewModelOverride.trim()
+        ? model.autoReviewModelOverride.trim()
+        : null,
   };
 
   // BEGIN local-cliproxy-gpt56-native-capability-parity

@@ -29,7 +29,8 @@
       "behaviorTemplate": "gpt-6.1-sol",
       "multiAgentVersion": "v2",
       "compHash": "cliproxy-gpt-6.1-sol-v2",
-      "serviceTiers": [{ "id": "priority", "name": "Fast", "description": "1.5x speed, increased usage" }]
+      "serviceTiers": [{ "id": "priority", "name": "Fast", "description": "1.5x speed, increased usage" }],
+      "autoReviewModelOverride": "cliproxy/gpt-6.1-sol"
     }
   ]
 }

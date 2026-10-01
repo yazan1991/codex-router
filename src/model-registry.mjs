@@ -717,6 +717,13 @@ function modelProblem(model, providers, slugs, gatewayModels) {
     return `model ${model.slug} has an invalid multiAgentVersion`;
   }
   if (
+    model.autoReviewModelOverride !== undefined &&
+    (typeof model.autoReviewModelOverride !== "string" ||
+      !model.autoReviewModelOverride.trim())
+  ) {
+    return `model ${model.slug} has an invalid autoReviewModelOverride`;
+  }
+  if (
     model.supportsReasoningSummaries !== undefined &&
     typeof model.supportsReasoningSummaries !== "boolean"
   ) {
