@@ -20,11 +20,18 @@ test("the pre-content budget scales with the request size", () => {
   assert.equal(preludeBudgetMs({ baseMs: base, requestBytes: 0 }), base);
 
   // ~1k tokens of request bytes buys one increment.
-  assert.equal(preludeBudgetMs({ baseMs: base, requestBytes: 4_000 }), base + 150);
+  assert.equal(preludeBudgetMs({ baseMs: base, requestBytes: 4_000 }), base + 300);
 
   const huge = preludeBudgetMs({ baseMs: base, requestBytes: 4 * 577_000 });
-  assert.equal(huge, base + 577 * 150);
+  assert.equal(huge, base + 577 * 300);
   assert.ok(huge > 100_000, "a 577k-token prefill needs minutes, not the flat budget");
+
+  // Linux production evidence: a ~184k-token session still hit the previous
+  // ~58s budget. The revised size allowance gives that class of turn >80s
+  // without changing the 30s base for small requests.
+  const linuxHeavy = preludeBudgetMs({ baseMs: base, requestBytes: 4 * 184_000 });
+  assert.equal(linuxHeavy, 85_200);
+  assert.ok(linuxHeavy > 80_000);
 
   // The allowance only grows, and the ceiling holds unless the operator's base
   // is already above it.
