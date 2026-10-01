@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
   routedAgentDefinition,
+  routedAgentTypeRoutes,
   routedCodexAgentStatus,
   syncRoutedCodexAgents,
 } from "../src/codex-agent-catalog.mjs";
@@ -27,6 +30,16 @@ test("routed agent definitions select the router provider and exact model slug",
   assert.match(definition.contents, /Before claiming that something is absent/);
   assert.match(definition.contents, /Never invent or reuse a stale name/);
   assert.match(definition.contents, /Do not stop after merely announcing a next action/);
+});
+
+test("routed agent-type routes resolve only an unambiguous managed agent", () => {
+  const routes = routedAgentTypeRoutes([
+    { slug: "chatgpt-web/high", displayName: "ChatGPT Web High" },
+    { slug: "other/high", displayName: "Other High" },
+  ]);
+  assert.equal(routes.get("router_chatgpt_web_high")?.slug, "chatgpt-web/high");
+  assert.equal(routes.get("router_other_high")?.slug, "other/high");
+  assert.equal(routes.get("reviewer"), undefined);
 });
 
 test("agent sync writes one private definition for every routed model", () => {
@@ -131,5 +144,83 @@ test("only registry-proven models receive routed agent definitions", () => {
       disabled: ["grok-oauth/grok-4.5"],
     }).map(({ slug }) => slug),
     ["kimi-oauth/k3"],
+  );
+});
+
+test("Astra routed agent is an escalation-only read-only advisor with dynamic effort", () => {
+  const definition = routedAgentDefinition({
+    slug: "cliproxy/gpt-6-astra",
+    displayName: "GPT 6 Astra (CLIProxy)",
+  });
+  assert.match(definition.contents, /escalation-only expert advisor/i);
+  assert.match(definition.contents, /^sandbox_mode = "read-only"$/m);
+  assert.match(definition.contents, /Do not use for routine work/i);
+  assert.equal(/model_reasoning_effort/.test(definition.contents), false);
+});
+
+test("a configured subagent effort rides along in the agent definition", () => {
+  const withEffort = routedAgentDefinition(kimi, { effort: "max" });
+  assert.match(withEffort.contents, /^model_reasoning_effort = "max"$/m);
+
+  const withoutEffort = routedAgentDefinition(kimi);
+  assert.equal(
+    /model_reasoning_effort/.test(withoutEffort.contents),
+    false,
+    "an unset effort must not freeze the model's own default into the file",
+  );
+});
+
+// A configured subagent effort is written into the definition, so the drift
+// check has to expect it too. It did not, and the two disagreed by exactly the
+// `model_reasoning_effort` line: doctor reported the agent `stale`, `--fix`
+// republished byte-identical contents, and the next check said `stale` again —
+// for as long as the effort stayed set (#804).
+//
+// `MULTI_AGENT_STATE_PATH` is resolved when `multi-agent-state.mjs` loads, so
+// this runs in a child with the state directory set from the start. Reading the
+// operator's own settings here is what let this defect hide: the assertion
+// passed or failed depending on whether the machine running it happened to have
+// an effort configured.
+test("a configured subagent effort round-trips through sync and status", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-agent-effort-"));
+  const stateDir = path.join(testRoot, "state");
+  const codexHome = path.join(testRoot, "codex");
+  const agentsDir = path.join(codexHome, "agents");
+
+  const stateModule = pathToFileURL(path.join(root, "src/multi-agent-state.mjs")).href;
+  const catalogModule = pathToFileURL(path.join(root, "src/codex-agent-catalog.mjs")).href;
+  const script = `
+    import { mkdirSync } from "node:fs";
+    mkdirSync(process.env.CODEX_ROUTER_STATE_DIR, { recursive: true });
+    mkdirSync(${JSON.stringify(agentsDir)}, { recursive: true });
+    const { setSubagentEffort } = await import(${JSON.stringify(stateModule)});
+    const { syncRoutedCodexAgents, routedCodexAgentStatus } =
+      await import(${JSON.stringify(catalogModule)});
+    const model = { slug: "grok-oauth/grok-4.5", displayName: "Grok 4.5 (OAuth)" };
+    setSubagentEffort(model.slug, "medium");
+    syncRoutedCodexAgents([model], ${JSON.stringify(agentsDir)});
+    process.stdout.write(JSON.stringify(
+      routedCodexAgentStatus([model], ${JSON.stringify(agentsDir)}),
+    ));
+  `;
+  const output = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      CODEX_ROUTER_STATE_DIR: stateDir,
+      CODEX_HOME: codexHome,
+      MODEL_ROUTER_MULTI_AGENT_STATE: path.join(stateDir, "multi-agent-settings.json"),
+    },
+  });
+
+  const status = JSON.parse(output);
+  assert.equal(status.ok, true, `an effort-configured agent must not read as drifted: ${output}`);
+  assert.deepEqual(status.stale, []);
+  assert.equal(status.current, 1);
+  // ...and the effort really is in the file Codex spawns, not merely agreed on.
+  assert.match(
+    readFileSync(path.join(agentsDir, "router-model-grok-oauth-grok-4-5.toml"), "utf8"),
+    /model_reasoning_effort = "medium"/,
   );
 });

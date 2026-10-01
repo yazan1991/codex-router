@@ -1425,10 +1425,11 @@ account-specific rows through this repository:
 ./bin/curate-models chatgpt-web --refresh
 ```
 
-Curation reads the launcher's loopback `/v1/models` catalog, discards every
-native GPT row, and offers only the `chatgpt-web/*` models the signed-in account
-currently exposes. A chosen route keeps its fixed ChatGPT effort and advertised
-context/image metadata. The request path goes directly from the router to the
+Curation reads the launcher's unauthenticated loopback `/v1/chatgpt-web-models`
+catalog, discards every native GPT row, and offers only the `chatgpt-web/*`
+models the signed-in account currently exposes. A chosen route keeps its fixed
+ChatGPT effort and advertised context/image metadata. The request path goes
+directly from the router to the
 loopback bridge so Codex's native tool, collaboration, image, and compaction
 envelope is not translated by LiteLLM. The user's Codex/ChatGPT bearer token is
 never sent to the launcher; the local hop receives only a non-secret placeholder.

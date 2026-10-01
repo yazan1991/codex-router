@@ -110,7 +110,7 @@ test("rank preserves provider identity and ignores caller capability claims", ()
 
 test("ambiguous bare model names do not lose provider identity", () => {
   const ranked = rankSubagentCandidates(
-    [AUTHORITY[0], AUTHORITY[1]],
+    [GROK_API, KIMI_API],
     { authority: AUTHORITY, settings: SETTINGS, chain: ["grok-api/grok-4.5"] },
   );
   assert.deepEqual(ranked.map((entry) => `${entry.slug}@${entry.provider}`), ["grok-api/grok-4.5@grok-api"]);
@@ -151,6 +151,7 @@ test("fallback is bounded, pre-response, and excludes only the exact failed iden
     failureKind: "connection",
     failedTarget: { slug: GROK_API.slug, provider: GROK_API.provider },
     maxAttempts: 99,
+    settings: SETTINGS,
   });
   assert.equal(plan.target.provider, "grok-oauth");
   assert.deepEqual(plan.fallbacks.map((entry) => entry.provider), ["kimi-api", "zai-coding"]);

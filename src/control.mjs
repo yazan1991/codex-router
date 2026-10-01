@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { pickerCommandArgs } from "./control-args.mjs";
 import { readControlHealth } from "./control-health.mjs";
+import { readControlActivity } from "./control-activity.mjs";
 import { nativeSubagentCertification, promoteNativeMultiAgent } from "./catalog.mjs";
 import {
   applyModelOverlayPublication,
@@ -45,6 +46,7 @@ import {
   runOperationProcessTree,
 } from "./process-tree.mjs";
 import { inheritedProxyEnvironment } from "./proxy-environment.mjs";
+import { routerNodeBinary } from "./node-runtime.mjs";
 import { installStableFetchTransport } from "./fetch-transport.mjs";
 
 // The tray launches this control process from the desktop session, which can
@@ -97,6 +99,9 @@ const restartBearingOverlayOperation = new Set([
   "vision-bridge",
   "local-models",
   "signed-routing",
+  // Descriptor, credential, and removal changes republish the model overlay
+  // and restart the router, exactly like `credential`.
+  "generic-providers",
 ]).has(args[0]);
 const selfReplacingControl =
   args[0] === "maintenance" ||
@@ -117,11 +122,18 @@ if (!selfReplacingControl && !boundedOperationChild(process.env, {
   // escalate a full process-group termination. Catalog desktop watchdogs keep
   // another ten seconds outside this boundary; shorter ordinary operations
   // retain the larger margin chosen by their UI runner.
+  //
+  // `stdio: "inherit"` is load-bearing. The default `"capture"` mode ignores
+  // stdin, so a Control Center credential write would arrive empty at the
+  // inner process. A packaged Electron parent has no console to inherit:
+  // `process-tree.mjs` then relays the three streams through pipes and keeps
+  // CREATE_NO_WINDOW. Do not switch this re-exec to capture to hide a
+  // Windows console (#775); that was the wrong layer, and it would drop keys.
   const deadline = operationDeadlineFromEnvironment(process.env, {
     timeoutMs: maximumControlOperationMs,
     maximumMs: maximumControlOperationMs,
   });
-  const result = await runOperationProcessTree(process.execPath, [SELF, ...args], {
+  const result = await runOperationProcessTree(routerNodeBinary(), [SELF, ...args], {
     cwd: REPO_ROOT,
     env: process.env,
     childEnvironment: {
@@ -144,7 +156,7 @@ function targetIsActive(target) {
   if (target === "cursor") return existsSync(CURSOR_PUBLISHED);
   if (target === "claude") return existsSync(CLAUDE_PUBLISHED);
   if (target === "openclaw") return existsSync(OPENCLAW_PUBLISHED);
-  const result = spawnSync(process.execPath, [path.join(REPO_ROOT, "src", "service.mjs"), "status"], {
+  const result = spawnSync(routerNodeBinary(), [path.join(REPO_ROOT, "src", "service.mjs"), "status"], {
     env: { ...process.env, MODEL_ROUTER_TARGET: target },
     encoding: "utf8",
   });
@@ -171,7 +183,7 @@ function configuredDefaultModel(configPath) {
 
 function codexConfigSnapshot() {
   const result = spawnSync(
-    process.execPath,
+    routerNodeBinary(),
     [path.join(REPO_ROOT, "src", "config-manager.mjs"), "status"],
     { env: { ...process.env, MODEL_ROUTER_TARGET: "codex" }, encoding: "utf8" },
   );
@@ -293,20 +305,20 @@ async function emitProbe() {
     [...new Set([...Object.keys(visionBenchmarks), ...Object.keys(localBenchmarks)])]
       .map((tag) => [tag, { ...visionBenchmarks[tag], ...localBenchmarks[tag] }]),
   );
-  const { localModelInventory, localModelsSnapshot, runningLocalModels } = await import(
+  const { localModelStatusInputs, localModelsSnapshot } = await import(
     "./local-models.mjs",
   );
-  const { localOllamaRuntimeSnapshot } = await import("./ollama-runtime.mjs");
   const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
   // Bounded and weekly: the tray reads this snapshot constantly, so a fresh
   // cache costs nothing and a stale one costs one short, failure-tolerant pass.
   if (TARGET === "codex") await refreshVisionModelSizesIfStale();
   // One probe serves several tray sections. Reuse the local reads so the same
   // snapshot does not run `ollama list` and the hardware checks once per view.
-  const localInventory = TARGET === "codex" ? localModelInventory() : [];
-  const localRunning = TARGET === "codex" ? runningLocalModels() : [];
+  const localStatus = TARGET === "codex" ? await localModelStatusInputs() : undefined;
+  const localInventory = localStatus?.inventory || [];
+  const localRunning = localStatus?.running || [];
   const localProfile = TARGET === "codex" ? hostVisionProfile() : undefined;
-  const localRuntime = TARGET === "codex" ? localOllamaRuntimeSnapshot() : undefined;
+  const localRuntime = localStatus?.runtime;
   const localInstalled = localInventory.map((model) => model.tag);
 
   const enabledProviders = readProviderSelection();
@@ -314,8 +326,20 @@ async function emitProbe() {
   const hiddenModels = new Set(picker.hidden);
   const visibleModels = new Set(picker.visible);
   const subagentSettings = subagentSettingsSnapshot();
-  const usageEvents = TARGET === "codex"
-    ? (await import("./usage-events.mjs")).recentUsageEvents()
+  const usageEventsModule = TARGET === "codex" ? await import("./usage-events.mjs") : undefined;
+  // The tray polls this probe constantly and the ledger is large, so read the
+  // window once and derive both views from it. The recent-activity list still
+  // gets the same bounded tail it always got; the hourly rollup needs the whole
+  // window, because a capped sample cannot answer "how much traffic did this
+  // router carry today" -- on a busy day 1,000 events is under two hours.
+  const windowEvents = usageEventsModule
+    ? usageEventsModule.recentUsageEvents({ limit: Number.POSITIVE_INFINITY })
+    : [];
+  const usageEvents = usageEventsModule
+    ? windowEvents.slice(-usageEventsModule.RECENT_USAGE_EVENT_LIMIT)
+    : [];
+  const usageEventHours = usageEventsModule
+    ? usageEventsModule.hourlyUsageRollup({ readEvents: () => windowEvents })
     : [];
   // Local proof records are surfaced for status only. They never alter the
   // registry capability sent to Codex.
@@ -398,6 +422,7 @@ async function emitProbe() {
       ...(TARGET === "codex"
         ? {
             usageEvents,
+            usageEventHours,
             nativeAliases: readNativeAliases(),
             modelSettings: {
               subagents: subagentSettings,
@@ -487,7 +512,7 @@ async function emitProbeSet(provider, desired) {
 async function routerCatalogSnapshot() {
   const { canonicalProviderId, readProviderSelection, selectedConfiguredListedModels } =
     await import("./provider-selection.mjs");
-  const { CHECKED_IN_MODELS } = await import("./model-registry.mjs");
+  const { CHECKED_IN_MODELS, LOCAL_MODEL_SLUGS } = await import("./model-registry.mjs");
   const { modelPickerSnapshot } = await import("./model-picker-state.mjs");
   const { subagentSettingsSnapshot } = await import("./multi-agent-state.mjs");
   const { applySubagentProofs } = await import("./subagent-proofs.mjs");
@@ -510,6 +535,10 @@ async function routerCatalogSnapshot() {
     subagentCertification: subagentCertification(model),
     visible: picker.hasExplicitVisibility ? visible.has(model.slug) : !hidden.has(model.slug),
     isFree: model.isFree === true,
+    // Locally curated, so curation can prune it again. Absent on every route
+    // this checkout ships, which is what stops a desktop delete control from
+    // offering to remove something no overlay write could take away.
+    ...(LOCAL_MODEL_SLUGS.has(model.slug) ? { local: true } : {}),
     ...(Number.isFinite(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
     ...(Array.isArray(model.inputModalities) ? { inputModalities: model.inputModalities } : {}),
     ...reasoningLevelField(model.reasoningLevels),
@@ -543,24 +572,59 @@ async function routerCatalogSnapshot() {
 
 // --- aggregate over all targets --------------------------------------------
 
-function probeTargets() {
-  const targets = {};
-  for (const target of TARGETS) {
-    const result = spawnSync(process.execPath, [SELF, "--probe"], {
+// Each probe is its own Node process, because a target is chosen by
+// MODEL_ROUTER_TARGET at import time and cannot be switched inside one
+// interpreter. They used to run one after another, so a four-target install
+// paid four sequential boots -- about a second each, measured, and the tray
+// pays the whole bill on every snapshot it asks for.
+//
+// Nothing in a probe depends on another finishing. `emitProbe` only reads, and
+// the one write it can reach refreshes the vision size cache for `codex`
+// alone, through a pid-named temporary and a rename. So start them together
+// and wait for the set: identical work, a quarter of the wall clock.
+function runProbe(target) {
+  return new Promise((resolve) => {
+    const child = spawn(routerNodeBinary(), [SELF, "--probe"], {
       env: { ...process.env, MODEL_ROUTER_TARGET: target },
-      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
     });
-    try {
-      targets[target] = result.status === 0 ? JSON.parse(result.stdout) : { target, error: (result.stderr || "").trim() || "probe failed" };
-    } catch {
-      targets[target] = { target, error: "probe returned invalid JSON" };
-    }
-  }
-  return targets;
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    // `error` fires when the spawn itself fails, and `close` may then never
+    // arrive; resolving twice is inert, so both paths report through here.
+    const settle = (status) => {
+      try {
+        resolve([
+          target,
+          status === 0
+            ? JSON.parse(stdout)
+            : { target, error: stderr.trim() || "probe failed" },
+        ]);
+      } catch {
+        resolve([target, { target, error: "probe returned invalid JSON" }]);
+      }
+    };
+    child.on("error", () => settle(null));
+    child.on("close", settle);
+  });
+}
+
+// Promise.all keeps its input order, so the targets are still reported in the
+// order TARGETS declares them rather than in whichever order they finished.
+async function probeTargets() {
+  return Object.fromEntries(await Promise.all(TARGETS.map(runProbe)));
 }
 
 async function printOverview(asJson) {
-  const targets = probeTargets();
+  const targets = await probeTargets();
   if (asJson) {
     // The tray polls this. Presence rides along so the rule that decides
     // whether the router may be stopped is computed once, here, rather than
@@ -615,7 +679,7 @@ function requestedControlTargets() {
 
 function setProviderSelectionForTargets(provider, desired, selected) {
   for (const target of selected) {
-    const result = spawnSync(process.execPath, [SELF, "--probe-set", provider, desired], {
+    const result = spawnSync(routerNodeBinary(), [SELF, "--probe-set", provider, desired], {
       env: { ...process.env, MODEL_ROUTER_TARGET: target },
       encoding: "utf8",
     });
@@ -641,17 +705,17 @@ async function runSet(provider, desired) {
 function refreshActiveTarget(target) {
   const command =
     target === "codex"
-      ? [process.execPath, [path.join(REPO_ROOT, "src", "catalog.mjs")]]
+      ? [routerNodeBinary(), [path.join(REPO_ROOT, "src", "catalog.mjs")]]
       : target === "dsh"
-        ? [process.execPath, [path.join(REPO_ROOT, "src", "dsh-config-manager.mjs"), "install"]]
+        ? [routerNodeBinary(), [path.join(REPO_ROOT, "src", "dsh-config-manager.mjs"), "install"]]
         : target === "gemini"
-          ? [process.execPath, [path.join(REPO_ROOT, "src", "gemini-config-manager.mjs"), "install"]]
+          ? [routerNodeBinary(), [path.join(REPO_ROOT, "src", "gemini-config-manager.mjs"), "install"]]
           : target === "cursor"
-            ? [process.execPath, [path.join(REPO_ROOT, "src", "cursor-config-manager.mjs"), "install"]]
+            ? [routerNodeBinary(), [path.join(REPO_ROOT, "src", "cursor-config-manager.mjs"), "install"]]
           : target === "claude"
-            ? [process.execPath, [path.join(REPO_ROOT, "src", "claude-code-config-manager.mjs"), "install"]]
+            ? [routerNodeBinary(), [path.join(REPO_ROOT, "src", "claude-code-config-manager.mjs"), "install"]]
           : target === "openclaw"
-            ? [process.execPath, [path.join(REPO_ROOT, "src", "openclaw-config-manager.mjs"), "install"]]
+            ? [routerNodeBinary(), [path.join(REPO_ROOT, "src", "openclaw-config-manager.mjs"), "install"]]
           : undefined;
   if (!command) return;
   const result = spawnSync(command[0], command[1], {
@@ -893,6 +957,11 @@ async function readSecretFromStdin() {
 
 async function saveProviderCredential(providerId) {
   const { providerOnboardingSnapshot, saveApiCredential } = await import("./provider-onboarding.mjs");
+  const { apiProvider } = await import("./provider-credentials.mjs");
+  const provider = apiProvider(providerId);
+  if (provider.credential?.resolver) {
+    throw new Error(`${provider.displayName} does not accept API keys.`);
+  }
   const value = await readSecretFromStdin();
   // The control-center sends this command before it refreshes its provider
   // snapshot. Keep credential persistence, selection, and target publication
@@ -1039,6 +1108,35 @@ async function handleProviderKeyPool(providerId, action, value) {
   }
 }
 
+async function handleVertex(action, projectId, location) {
+  const {
+    clearVertexConfiguration,
+    setVertexConfiguration,
+    vertexConfigurationStatus,
+  } = await import("./vertex-state.mjs");
+  const { credentialStatus } = await import("./provider-credentials.mjs");
+  const status = () => ({
+    configuration: vertexConfigurationStatus({ persistent: true }),
+    credential: credentialStatus("vertex", { persistent: true }),
+  });
+
+  if (!action || action === "status") {
+    process.stdout.write(`${JSON.stringify(status())}\n`);
+    return;
+  }
+  if (action === "set" || action === "configure") {
+    if (!projectId || !location) {
+      throw new Error("Usage: control vertex set <project-id> <location>");
+    }
+    setVertexConfiguration({ projectId, location });
+  } else if (action === "clear") {
+    clearVertexConfiguration();
+  } else {
+    throw new Error("Usage: control vertex status|set <project-id> <location>|clear");
+  }
+  process.stdout.write(`${JSON.stringify(status())}\n`);
+}
+
 async function setLoginFreeMode(desired) {
   if (desired !== "on" && desired !== "off") {
     throw new Error("Usage: control auth-mode <on|off>");
@@ -1073,7 +1171,7 @@ async function setLoginFreeMode(desired) {
     }
   }
   const catalog = spawnSync(
-    process.execPath,
+    routerNodeBinary(),
     [path.join(REPO_ROOT, "src", "catalog.mjs")],
     {
       cwd: REPO_ROOT,
@@ -1096,7 +1194,7 @@ async function setLoginFreeMode(desired) {
   const commandArgs = [path.join(REPO_ROOT, "src", "config-manager.mjs"), command];
   if (loginFreeModel) commandArgs.push(loginFreeModel);
   const result = spawnSync(
-    process.execPath,
+    routerNodeBinary(),
     commandArgs,
     {
       cwd: REPO_ROOT,
@@ -1124,7 +1222,7 @@ async function setSignedRouting(desired) {
   }
   const command = desired === "on" ? "signed-enable" : "signed-disable";
   const runConfig = (configCommand = command) => spawnSync(
-    process.execPath,
+    routerNodeBinary(),
     [path.join(REPO_ROOT, "src", "config-manager.mjs"), configCommand],
     {
       cwd: REPO_ROOT,
@@ -1140,7 +1238,7 @@ async function setSignedRouting(desired) {
     };
     if (!allowTestFault) delete environment.MODEL_ROUTER_TEST_FAIL_AFTER_CATALOG_WRITE;
     return spawnSync(
-      process.execPath,
+      routerNodeBinary(),
       [path.join(REPO_ROOT, "src", "catalog.mjs")],
       {
       cwd: REPO_ROOT,
@@ -1198,6 +1296,16 @@ async function setSignedRouting(desired) {
     throw new Error("Signed router mode could not be changed.");
   }
   process.stdout.write(result.stdout);
+  if (desired === "on") {
+    const { readNativeRedirect } = await import("./native-redirect.mjs");
+    const redirect = readNativeRedirect();
+    if (redirect) {
+      process.stderr.write(
+        `Native redirect remains active for ${redirect}; it is independent of signed routing ` +
+          "and failover. Clear it separately if native GPT turns should stay on OpenAI.\n",
+      );
+    }
+  }
 }
 
 async function setLoginFreeModel(slug) {
@@ -1214,7 +1322,7 @@ async function setLoginFreeModel(slug) {
   const { nativeAliasFor } = await import("./native-alias.mjs");
   const configModel = nativeAliasFor(value) || value;
   const result = spawnSync(
-    process.execPath,
+    routerNodeBinary(),
     [path.join(REPO_ROOT, "src", "config-manager.mjs"), "login-free-enable", configModel],
     {
       cwd: REPO_ROOT,
@@ -1251,7 +1359,7 @@ async function setRouterDefault(action, slug) {
   }
   const command = action === "set" ? "router-default-set" : "router-default-clear";
   const result = spawnSync(
-    process.execPath,
+    routerNodeBinary(),
     [path.join(REPO_ROOT, "src", "config-manager.mjs"), command, ...(value ? [value] : [])],
     {
       cwd: REPO_ROOT,
@@ -1273,7 +1381,7 @@ async function updateAndVerifyCodex() {
 function runDoctor(args) {
   const json = args.includes("--json");
   const result = spawnSync(
-    process.execPath,
+    routerNodeBinary(),
     [path.join(REPO_ROOT, "src", "doctor.mjs"), ...args],
     {
       cwd: REPO_ROOT,
@@ -1459,6 +1567,43 @@ async function handleSubagents(action, value, flag, rest = []) {
     setMultiAgentModels,
     subagentSettingsSnapshot,
   } = await import("./multi-agent-state.mjs");
+  if (action === "explain") {
+    // "Why can't Codex delegate to this model?" had no answer short of
+    // spawning one and reading `codex exited 1` (#804). Selection lived in
+    // `subagents status`, promotion in the published catalog, and the agent
+    // definition on disk, and nothing joined the three. Read-only and
+    // quota-free: it reports, so it promotes nothing and probes nothing.
+    const slug = String(value || "").trim();
+    if (!slug) throw new Error("Usage: control subagents explain <model-slug> [--json]");
+    const [
+      { MODELS },
+      { readProviderSelection, canonicalProviderId },
+      { readHiddenModels },
+      { explainSubagentRoute, formatSubagentExplanation },
+      { CODEX_AGENTS_DIR },
+    ] = await Promise.all([
+      import("./model-registry.mjs"),
+      import("./provider-selection.mjs"),
+      import("./model-picker-state.mjs"),
+      import("./subagent-explain.mjs"),
+      import("./paths.mjs"),
+    ]);
+    const selected = new Set(readProviderSelection().map((id) => canonicalProviderId(id)));
+    const explanation = explainSubagentRoute({
+      slug,
+      models: MODELS,
+      providerEnabled: (providerId) => selected.has(canonicalProviderId(providerId)),
+      hidden: readHiddenModels(),
+      reasoningLevels: await modelReasoningLevels(slug),
+      agentsDir: CODEX_AGENTS_DIR,
+    });
+    process.stdout.write(
+      [...rest, flag].includes("--json")
+        ? `${JSON.stringify(explanation)}\n`
+        : `${formatSubagentExplanation(explanation)}\n`,
+    );
+    return;
+  }
   if (action === "status") {
     const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
     const { subagentAutoPolicySnapshot } = await import("./subagent-auto-policy.mjs");
@@ -1728,7 +1873,8 @@ async function handleSubagents(action, value, flag, rest = []) {
     }
   } else {
     throw new Error(
-      "Usage: control subagents status|select-all|unselect-all|mode <all|selected|proven>|" +
+      "Usage: control subagents status|explain <model-slug> [--json]|select-all|unselect-all|" +
+        "mode <all|selected|proven>|" +
         "set <model-slug> <on|off>|effort <model-slug> <level|default>|" +
         "provider <provider-id> <on|off>|verify [model-slug ...]|certify <model-slug>|" +
         "policy status|provider <provider-id> <on|off>|model <model-slug> <on|off>|family <name> <on|off>",
@@ -2072,7 +2218,7 @@ async function handleVisionBridge(action, value, extra) {
         workerPid: null,
       });
       const child = spawn(
-        process.execPath,
+        routerNodeBinary(),
         [path.join(REPO_ROOT, "src", "vision-download.mjs"), tag],
         // windowsHide matters more here than anywhere else: a detached child
         // gets its own console on Windows, and this one lives for the length of
@@ -2226,6 +2372,7 @@ async function handleLocalModels(action, value, ...rest) {
   const {
     isLocalModelEnabled,
     LOCAL_MODELS_STATE_PATH,
+    localModelStatusInputs,
     localModelsSnapshot,
     setLocalModelEnabled,
   } = await import("./local-models.mjs");
@@ -2244,9 +2391,11 @@ async function handleLocalModels(action, value, ...rest) {
   const { lmstudioSnapshot } = await import("./lmstudio-models.mjs");
   const { localMlxUiSnapshot } = await import("./local-mlx-operation.mjs");
   const snapshot = async () => {
-    const [lmstudio, mlx] = await Promise.all([lmstudioSnapshot(), localMlxUiSnapshot()]);
+    const [lmstudio, mlx, ollama] = await Promise.all([
+      lmstudioSnapshot(), localMlxUiSnapshot(), localModelStatusInputs(),
+    ]);
     return {
-      ...localModelsSnapshot({ benchmarks: localAndVisionBenchmarks }),
+      ...localModelsSnapshot({ benchmarks: localAndVisionBenchmarks, ...ollama }),
       lmstudio,
       mlx,
     };
@@ -2322,12 +2471,12 @@ async function handleLocalModels(action, value, ...rest) {
     return;
   }
   if (action === "runtime") {
-    const { localOllamaRuntimeSnapshot, ensureOllamaHeadless, updateOllamaRuntime } = await import(
+    const { localOllamaRuntimeSnapshot, probeOllama, ensureOllamaHeadless, updateOllamaRuntime } = await import(
       "./ollama-runtime.mjs"
     );
     const subcommand = String(value || "status").trim();
     if (subcommand === "status") {
-      process.stdout.write(`${JSON.stringify(localOllamaRuntimeSnapshot())}\n`);
+      process.stdout.write(`${JSON.stringify(localOllamaRuntimeSnapshot({ serverReachable: (await probeOllama()).reachable }))}\n`);
       return;
     }
     if (subcommand === "update") {
@@ -2506,7 +2655,7 @@ async function handleLocalModels(action, value, ...rest) {
       await ensureOllamaHeadless({ install: installRuntime });
       if (cancelled()) return;
       writePhase("Starting model download");
-      const child = spawn(process.execPath, [path.join(REPO_ROOT, "src", "local-download.mjs"), tag], {
+      const child = spawn(routerNodeBinary(), [path.join(REPO_ROOT, "src", "local-download.mjs"), tag], {
         detached: true,
         env: detachedOperationEnvironment(),
         stdio: "ignore",
@@ -2651,7 +2800,7 @@ async function handleLocalModels(action, value, ...rest) {
       });
       try {
         const child = spawn(
-          process.execPath,
+          routerNodeBinary(),
           [path.join(REPO_ROOT, "src", "local-uninstall.mjs"), tag],
           {
             detached: true,
@@ -2866,7 +3015,7 @@ function handleService(action) {
     throw new Error(`Usage: control service ${SERVICE_COMMANDS.join("|")}`);
   }
   const result = spawnSync(
-    process.execPath,
+    routerNodeBinary(),
     [path.join(REPO_ROOT, "src", "service.mjs"), value],
     { stdio: ["inherit", "pipe", "pipe"], env: process.env, encoding: "utf8" },
   );
@@ -2890,7 +3039,7 @@ function handleTray(action) {
   const value = action || "status";
   if (value === "refresh") {
     const plan = spawnSync(
-      process.execPath,
+      routerNodeBinary(),
       [path.join(REPO_ROOT, "src", "install-plan.mjs"), "tray-plan"],
       { cwd: REPO_ROOT, env: process.env, encoding: "utf8" },
     );
@@ -2964,7 +3113,7 @@ function handleTray(action) {
         { stdio: "inherit", env: process.env, windowsHide: true },
       )
     : spawnSync(
-        process.execPath,
+        routerNodeBinary(),
         [path.join(REPO_ROOT, "src", "tray-service.mjs"), subcommand],
         { stdio: "inherit", env: process.env, windowsHide: true },
       );
@@ -2997,6 +3146,45 @@ async function handleNativeRedirect(action, value) {
     throw new Error(`Unknown routed model slug: ${value}`);
   }
   process.stdout.write(`${JSON.stringify(setNativeRedirect(value))}\n`);
+  process.stderr.write(
+    `Native redirect now sends every unmatched native GPT turn to ${value}. ` +
+      "This setting is independent of signed routing and failover; clear it with " +
+      "control native-redirect clear.\n",
+  );
+}
+
+// The reviewer counterpart to `native-redirect`. Codex's "Approve for me"
+// always runs on its own hidden native model, so with `Use Router with ChatGPT`
+// on, an exhausted ChatGPT plan leaves a routed session able to propose
+// commands and unable to execute the ones needing review (#787). Naming a
+// routed model here lets those approvals continue on a provider that still has
+// quota -- and only while the native reviewer has itself refused for quota.
+async function handleAutoReviewFallback(action, value) {
+  const {
+    autoReviewFallbackSnapshot,
+    clearAutoReviewFallback,
+    setAutoReviewFallback,
+  } = await import("./auto-review-fallback.mjs");
+  if (!action || action === "status") {
+    process.stdout.write(`${JSON.stringify(autoReviewFallbackSnapshot())}\n`);
+    return;
+  }
+  if (action === "clear") {
+    process.stdout.write(`${JSON.stringify(clearAutoReviewFallback())}\n`);
+    return;
+  }
+  if (action !== "set") {
+    throw new Error("Usage: control auto-review-fallback status|set <routed-model-slug>|clear");
+  }
+  if (!(await knownModelSlug(value))) {
+    throw new Error(`Unknown routed model slug: ${value}`);
+  }
+  process.stdout.write(`${JSON.stringify(setAutoReviewFallback(value))}\n`);
+  process.stderr.write(
+    `Automatic approval reviews fall back to ${value} while Codex's own reviewer is out of quota. ` +
+      "Reviews return to the native reviewer as soon as it answers again. This changes nothing " +
+      "about which model runs the session; clear it with control auto-review-fallback clear.\n",
+  );
 }
 
 // One action for "give me a working harness": install the CLI if it is absent,
@@ -3043,8 +3231,20 @@ async function handleHarness(action) {
 // enable entrypoint operators run from the terminal. OpenClaw's enable path
 // installs the official CLI when missing before it publishes the provider.
 async function handleClientSetup(target, publicUrl, hostname) {
-  if (!["codex", "dsh", "cursor", "claude", "openclaw"].includes(target)) {
-    throw new Error("Usage: control client-setup codex|dsh|cursor|claude|openclaw [--hostname PUBLIC_HOSTNAME|--public-url HTTPS_ORIGIN]");
+  const { ROUTED_HARNESS_IDS } = await import("./routed-harness-catalog.mjs");
+  if (![...["codex", "dsh", "cursor", "claude", "openclaw"], ...ROUTED_HARNESS_IDS].includes(target)) {
+    throw new Error("Usage: control client-setup codex|dsh|cursor|claude|openclaw|opencode|pi|omp|commandcode|hermes [--hostname PUBLIC_HOSTNAME|--public-url HTTPS_ORIGIN]");
+  }
+  // opencode, pi, omp, Command Code, and Hermes are published *into* rather
+  // than installed *as*: there is no `MODEL_ROUTER_TARGET` for them and no
+  // second service. Setup installs the client's CLI when this router can, then
+  // writes the one provider key it owns inside that client's own document.
+  if (ROUTED_HARNESS_IDS.includes(target)) {
+    if (publicUrl || hostname) throw new Error("--hostname and --public-url apply to Cursor only.");
+    const { createRoutedHarnessManager } = await import("./routed-harness-manager.mjs");
+    const result = createRoutedHarnessManager(target).install({ installMissingCli: true });
+    process.stdout.write(`${JSON.stringify({ target, configured: true, ...result })}\n`);
+    return;
   }
   if (target === "dsh") {
     if (publicUrl || hostname) throw new Error("--hostname and --public-url apply to Cursor only.");
@@ -3086,6 +3286,123 @@ async function handleClientSetup(target, publicUrl, hostname) {
     );
   }
   process.stdout.write(`${JSON.stringify({ target, configured: true })}\n`);
+}
+
+// Removing one published client is never a reason to tear the shared plane
+// down on its own: the service is retired only once `installedTargets()` is
+// empty. Cursor is the exception that may restart the shared service so its
+// separately tunneled public-edge child does not survive after disconnect.
+async function handleClientDisconnect(target) {
+  const { ROUTED_HARNESS_IDS } = await import("./routed-harness-catalog.mjs");
+  if (ROUTED_HARNESS_IDS.includes(target)) {
+    const { createRoutedHarnessManager } = await import("./routed-harness-manager.mjs");
+    process.stdout.write(`${JSON.stringify(createRoutedHarnessManager(target).uninstall())}\n`);
+    return;
+  }
+
+  // Target clients share one Node uninstall path on every OS. Do not route
+  // through currentCheckoutInstaller: on Windows that always runs install.
+  const uninstallArgv = {
+    codex: ["src/config-manager.mjs", "disable"],
+    dsh: ["src/dsh-config-manager.mjs", "uninstall"],
+    gemini: ["src/gemini-config-manager.mjs", "uninstall"],
+    cursor: ["src/cursor-config-manager.mjs", "uninstall"],
+    claude: ["src/claude-code-config-manager.mjs", "uninstall"],
+    openclaw: ["src/openclaw-config-manager.mjs", "uninstall"],
+  }[target];
+  if (!uninstallArgv) {
+    throw new Error(
+      "Usage: control client-disconnect codex|dsh|gemini|cursor|claude|openclaw|opencode|pi|omp|commandcode|hermes",
+    );
+  }
+
+  const uninstall = spawnSync(
+    process.execPath,
+    [path.join(REPO_ROOT, uninstallArgv[0]), uninstallArgv[1]],
+    {
+      cwd: REPO_ROOT,
+      env: { ...process.env, MODEL_ROUTER_TARGET: target },
+      encoding: "utf8",
+      windowsHide: true,
+    },
+  );
+  if (uninstall.error) throw uninstall.error;
+  if (uninstall.status !== 0) {
+    throw new Error(
+      String(uninstall.stderr || uninstall.stdout || `${target} disconnect failed`).trim(),
+    );
+  }
+
+  const { installedTargets } = await import("./target-integration.mjs");
+  const remaining = installedTargets();
+  const serviceAction = remaining.length === 0
+    ? "uninstall"
+    : target === "cursor"
+      ? "install"
+      : null;
+  if (serviceAction) {
+    const service = spawnSync(
+      process.execPath,
+      [path.join(REPO_ROOT, "src", "service.mjs"), serviceAction],
+      {
+        cwd: REPO_ROOT,
+        env: process.env,
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+    if (service.error) throw service.error;
+    if (service.status !== 0) {
+      throw new Error(
+        String(service.stderr || service.stdout || `service ${serviceAction} failed`).trim(),
+      );
+    }
+  }
+
+  process.stdout.write(`${JSON.stringify({
+    target,
+    removed: true,
+    remaining,
+    ...(serviceAction ? { serviceAction } : {}),
+  })}\n`);
+}
+
+// Move one routed harness CLI, or all of them, to its latest release.
+//
+// Separate from `client-setup` on purpose. Setup publishes models and installs
+// a missing CLI; it deliberately leaves a CLI that is already there alone,
+// because bumping somebody's global agent is not a thing to do as a
+// consequence of republishing a model list. This is the command that says
+// "update it", and it is the only path that does.
+//
+// `--all` reports per client rather than stopping at the first failure: one
+// client with no updater, or a network blip on one package, is not a reason to
+// leave the other four on yesterday's build.
+async function handleClientUpdate(target) {
+  const { ROUTED_HARNESS_IDS } = await import("./routed-harness-catalog.mjs");
+  if (target !== "--all" && !ROUTED_HARNESS_IDS.includes(target)) {
+    throw new Error("Usage: control client-update opencode|pi|omp|commandcode|hermes|--all");
+  }
+  const { routedHarnessCliPath, updateRoutedHarness } = await import("./routed-harness-install.mjs");
+  if (target !== "--all") {
+    process.stdout.write(`${JSON.stringify(updateRoutedHarness(target), null, 2)}\n`);
+    return;
+  }
+  const results = [];
+  for (const id of ROUTED_HARNESS_IDS) {
+    // An absent client is skipped rather than installed: "update everything I
+    // have" must not become "install five coding agents I never asked for".
+    if (!routedHarnessCliPath(id)) {
+      results.push({ harness: id, skipped: "not installed" });
+      continue;
+    }
+    try {
+      results.push(updateRoutedHarness(id));
+    } catch (error) {
+      results.push({ harness: id, failed: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  process.stdout.write(`${JSON.stringify({ updated: results }, null, 2)}\n`);
 }
 
 async function handleClientExport() {
@@ -3332,6 +3649,8 @@ if (args.includes("--probe")) {
   await printProviderOnboarding();
 } else if (args[0] === "generic-providers") {
   await handleGenericProviders(...args.slice(1));
+} else if (args[0] === "vertex") {
+  await handleVertex(args[1] || "status", args[2], args[3]);
 } else if (args[0] === "install-cli") {
   if (!args[1]) throw new Error("Usage: control install-cli <oauth-provider>");
   await installProviderCli(args[1]);
@@ -3382,6 +3701,8 @@ if (args.includes("--probe")) {
   handleService(args[1]);
 } else if (args[0] === "native-redirect") {
   await handleNativeRedirect(args[1], args[2]);
+} else if (args[0] === "auto-review-fallback") {
+  await handleAutoReviewFallback(args[1], args[2]);
 } else if (args[0] === "tray") {
   handleTray(args[1]);
 } else if (args[0] === "harness") {
@@ -3390,9 +3711,19 @@ if (args.includes("--probe")) {
   const publicUrl = optionValue("--public-url");
   const hostname = optionValue("--hostname");
   if ((publicUrl && hostname) || ((publicUrl || hostname) && args.length !== 4) || (!publicUrl && !hostname && args.length !== 2)) {
-    throw new Error("Usage: control client-setup codex|dsh|cursor|claude|openclaw [--hostname PUBLIC_HOSTNAME|--public-url HTTPS_ORIGIN]");
+    throw new Error("Usage: control client-setup codex|dsh|cursor|claude|openclaw|opencode|pi|omp|commandcode|hermes [--hostname PUBLIC_HOSTNAME|--public-url HTTPS_ORIGIN]");
   }
   await handleClientSetup(args[1], publicUrl, hostname);
+} else if (args[0] === "client-disconnect") {
+  if (args.length !== 2) {
+    throw new Error("Usage: control client-disconnect codex|dsh|gemini|cursor|claude|openclaw|opencode|pi|omp|commandcode|hermes");
+  }
+  await handleClientDisconnect(args[1]);
+} else if (args[0] === "client-update") {
+  if (args.length !== 2) {
+    throw new Error("Usage: control client-update opencode|pi|omp|commandcode|hermes|--all");
+  }
+  await handleClientUpdate(args[1]);
 } else if (args[0] === "client-export") {
   await handleClientExport();
 } else if (args[0] === "presence") {
@@ -3402,6 +3733,9 @@ if (args.includes("--probe")) {
   await handleChatGptSession(args[1]);
 } else if (args[0] === "chatgpt-account-pool") {
   await handleChatGptAccountSwitch(args[1], args[2], args[3]);
+} else if (args[0] === "activity") {
+  if (args.length > 2) throw new Error("Usage: control activity [thread-id]");
+  process.stdout.write(`${JSON.stringify(await readControlActivity({ threadId: args[1] }))}\n`);
 } else if (args[0] === "health") {
   await printHealth();
 } else if (args[0] === "maintenance") {

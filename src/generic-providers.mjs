@@ -17,10 +17,7 @@ import {
   validateGenericProvider,
   validateGenericProviderHeaders,
 } from "./generic-provider-state.mjs";
-import { providerCatalogIdentityFingerprint } from "./model-catalog-cache.mjs";
 import { PROVIDERS } from "./model-registry.mjs";
-import { readProviderCredentialStore } from "./provider-credential-store.mjs";
-import { resolveGenericProviderCredentialReference } from "./provider-credentials.mjs";
 
 export {
   GENERIC_PROVIDER_ADAPTERS,
@@ -30,6 +27,7 @@ export {
 export { genericProviderConfigured } from "./generic-provider-readiness.mjs";
 import { writePrivateJson } from "./file-security.mjs";
 import { fetchUntrustedModelCatalog } from "./untrusted-model-discovery.mjs";
+import { resolveGenericProviderTransportSnapshot } from "./generic-provider-transport-snapshot.mjs";
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -186,40 +184,65 @@ function safeHeaderEntries(headers) {
   );
 }
 
-function credentialSecret(provider) {
-  if (!provider.credentialRef) return undefined;
-  const entry = readProviderCredentialStore().credentials.find((candidate) => candidate.id === provider.credentialRef);
-  if (!entry || entry.state !== "active") return undefined;
-  if (entry.providerType !== "generic") return undefined;
-  if (entry.providerId !== provider.id) return undefined;
-  if (entry.kind !== "api_key") return undefined;
-  return resolveGenericProviderCredentialReference(provider.id, entry.secretRef)?.value;
-}
-
 /**
  * Capture one credential-bound discovery attempt without exposing its secret.
  * The returned loader closes over the raw headers while callers receive only
  * the redacted descriptor and an installation-keyed identity fingerprint.
  */
-export function genericProviderDiscoverySnapshot(id) {
-  const provider = getGenericProvider(id);
-  if (!provider.enabled) throw new Error(`Generic provider ${provider.id} is disabled.`);
-  const secret = credentialSecret(provider);
-  if (provider.credentialRef && !secret) {
-    throw new Error(`Credential ${provider.credentialRef} is unavailable for generic provider ${provider.id}.`);
+// Ollama serves its OpenAI-compatible catalog at `<origin>/v1/models`, whose
+// records carry an id and nothing else, while `<origin>/api/show` names the
+// model's real context length and capabilities. Only an OpenAI-chat provider
+// rooted at `/v1` can be an Ollama server; the answer's shape is the proof
+// (an object with `capabilities` or `model_info`), so any other server that
+// happens to answer a POST there is ignored rather than trusted.
+export const OLLAMA_SHOW_MAX_MODELS = 64;
+export const OLLAMA_SHOW_MAX_LEADING_REFUSALS = 3;
+const OLLAMA_SHOW_ROUTE_MISSING_STATUSES = new Set([404, 405, 501]);
+
+export function ollamaShowOrigin(provider) {
+  if (provider?.adapter !== "openai-chat") return undefined;
+  let url;
+  try {
+    url = new URL(String(provider.baseUrl));
+  } catch {
+    return undefined;
   }
-  const headers = { ...provider.headers };
-  if (secret) headers.Authorization = `Bearer ${secret}`;
-  const headerPairs = Object.entries(headers)
-    .map(([name, value]) => [String(name).toLowerCase(), String(value)])
-    .sort(([left], [right]) => left.localeCompare(right));
-  const identityFingerprint = providerCatalogIdentityFingerprint([
-    "generic",
-    provider.id,
-    provider.baseUrl,
-    provider.adapter,
-    headerPairs,
-  ]);
+  if (!/\/v1\/?$/.test(url.pathname)) return undefined;
+  url.pathname = url.pathname.replace(/\/v1\/?$/, "");
+  url.search = "";
+  url.hash = "";
+  return url.toString().replace(/\/+$/, "");
+}
+
+// Turns one `/api/show` answer into the same record shape a provider's own
+// catalog would carry, so it merges through the ordinary metadata reader.
+// Fields Ollama does not state stay absent; nothing here is a guess.
+export function ollamaShowRecord(id, payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  const capabilities = Array.isArray(payload.capabilities) ? payload.capabilities.map(String) : undefined;
+  const info = payload.model_info && typeof payload.model_info === "object" ? payload.model_info : undefined;
+  if (!capabilities && !info) return undefined;
+  const record = { id };
+  let context;
+  for (const [key, value] of Object.entries(info || {})) {
+    if (!key.endsWith(".context_length")) continue;
+    if (!Number.isInteger(value) || value < 1) continue;
+    if (context === undefined || value < context) context = value;
+  }
+  if (context !== undefined) record.context_length = context;
+  if (capabilities) {
+    record.input_modalities = capabilities.includes("vision") ? ["text", "image"] : ["text"];
+    record.supports_tools = capabilities.includes("tools");
+    record.supports_reasoning = capabilities.includes("thinking");
+  }
+  return record;
+}
+
+export function genericProviderDiscoverySnapshot(id) {
+  const snapshot = resolveGenericProviderTransportSnapshot(id);
+  const provider = snapshot.provider;
+  const headers = snapshot.headers;
+  const identityFingerprint = snapshot.authorityFingerprint;
   const descriptor = genericProviderDescriptor(provider);
   return Object.freeze({
     descriptor,
@@ -237,6 +260,57 @@ export function genericProviderDiscoverySnapshot(id) {
       ...(resolveHost ? { resolveHost } : {}),
       ...(proxyResolvesDestination !== undefined ? { proxyResolvesDestination } : {}),
     }),
+    // Model id -> provider-shaped record for the ids an Ollama server described.
+    // Absent for endpoints that cannot be Ollama; empty when the server is not
+    // one. Each ask is bounded like the catalog fetch and carries the same
+    // headers, so a credentialed Ollama behind a proxy still answers.
+    fetchModelDetails: async ({
+      ids = [],
+      fetchImpl = globalThis.fetch,
+      timeoutMs = 30_000,
+      resolveHost,
+      proxyResolvesDestination,
+    } = {}) => {
+      const origin = ollamaShowOrigin(provider);
+      if (!origin) return undefined;
+      const details = {};
+      // A missing route says the origin is not Ollama; a per-model refusal
+      // (a local model whose store is unavailable, say) does not. Without a
+      // route-level signal, a run of refusals before any description is
+      // enough evidence to stop asking.
+      let refusals = 0;
+      for (const modelId of ids.slice(0, OLLAMA_SHOW_MAX_MODELS)) {
+        let payload;
+        try {
+          payload = await fetchUntrustedModelCatalog(`${origin}/api/show`, {
+            fetchImpl,
+            headers,
+            timeoutMs,
+            allowPrivate: provider.allowPrivate,
+            body: { model: modelId },
+            parse: "json",
+            acceptNonOk: true,
+            ...(resolveHost ? { resolveHost } : {}),
+            ...(proxyResolvesDestination !== undefined ? { proxyResolvesDestination } : {}),
+          });
+        } catch {
+          // A hanging or unreadable /api/show is the same evidence as an
+          // HTTP refusal: the origin is not describing models this way.
+          refusals += 1;
+          if (Object.keys(details).length === 0 && refusals >= OLLAMA_SHOW_MAX_LEADING_REFUSALS) return details;
+          continue;
+        }
+        if (payload && payload.ok === false) {
+          if (OLLAMA_SHOW_ROUTE_MISSING_STATUSES.has(payload.status)) return details;
+          refusals += 1;
+          if (Object.keys(details).length === 0 && refusals >= OLLAMA_SHOW_MAX_LEADING_REFUSALS) return details;
+          continue;
+        }
+        const record = ollamaShowRecord(modelId, payload);
+        if (record) details[modelId] = record;
+      }
+      return details;
+    },
   });
 }
 
@@ -322,10 +396,10 @@ async function boundedResponseBody(response, maxBytes = MAX_RESPONSE_BYTES) {
 export async function requestGenericProvider(
   id,
   requestPath,
-  { fetchImpl = undiciFetch, lookup = lookupHost, timeoutMs = 10_000, ...init } = {},
+  { fetchImpl = undiciFetch, lookup = lookupHost, timeoutMs = 10_000, expectedAuthority, ...init } = {},
 ) {
-  const provider = getGenericProvider(id);
-  if (!provider.enabled) throw unavailable(`Generic provider ${provider.id} is disabled.`);
+  const snapshot = resolveGenericProviderTransportSnapshot(id, { expectedAuthority });
+  const provider = snapshot.provider;
   const endpoint = destinationUrl(provider, requestPath);
   await validateResolvedDestination(endpoint, provider, lookup);
   const requestHeaders = safeHeaderEntries(init.headers);
@@ -333,11 +407,7 @@ export async function requestGenericProvider(
   // add ordinary content-negotiation headers, but cannot replace tenant or
   // gateway selection chosen in the protected provider descriptor.
   const headers = mergeRequestHeaders(requestHeaders, provider.headers);
-  const secret = credentialSecret(provider);
-  if (provider.credentialRef && !secret) {
-    throw unavailable(`The bound credential is unavailable for generic provider ${provider.id}.`);
-  }
-  if (secret) headers.Authorization = `Bearer ${secret}`;
+  if (snapshot.headers.Authorization) headers.Authorization = snapshot.headers.Authorization;
   const useDispatcher = fetchImpl === undiciFetch;
   const dispatcher = useDispatcher ? createDestinationDispatcher(endpoint, provider, timeoutMs) : undefined;
   try {

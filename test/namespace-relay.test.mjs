@@ -14,14 +14,26 @@ import {
   flattenNamespaceTools,
   flattenToolChoice,
   flattenToolSearchHistory,
-  recoverPreflattenedMcpTools,
+  restorePreflattenedToolNamespaces,
   rewriteNamespaceFunctionCall,
   rewriteNamespaceResponsePayload,
   repairToolSchemaRoots,
   stripSearchContentTypes,
+  stripUnissuedEncryptedReasoning,
+  stripUnissuedEncryptedReasoningInclude,
+  anthropicFunctionTools,
   ToolSearchHistoryCapacityError,
 } from "../src/namespace-relay.mjs";
 import { CODEX_APP_TOOLS, mergeCodexAppTools } from "../src/codex-app-tools.mjs";
+import {
+  APPLY_PATCH_TOOL_NAME,
+  GROK_APPLY_PATCH_CREATE_EXAMPLE,
+  GROK_APPLY_PATCH_GUIDANCE,
+  GROK_APPLY_PATCH_GUIDANCE_MARKER,
+  GROK_APPLY_PATCH_GUIDANCE_ROUTE,
+  GROK_APPLY_PATCH_UPDATE_EXAMPLE,
+  applyGrokApplyPatchGuidance,
+} from "../src/grok-apply-patch-guidance.mjs";
 
 function collect(stream) {
   return new Promise((resolve, reject) => {
@@ -33,6 +45,88 @@ function collect(stream) {
     stream.on("error", reject);
   });
 }
+
+test("Azure plaintext collaboration output carries Codex's explicit plaintext marker", () => {
+  const lookups = buildNamespaceLookups(new Map());
+  const call = {
+    type: "function_call",
+    namespace: "agents",
+    name: "spawn_agent",
+    call_id: "call-azure-agent",
+    arguments: JSON.stringify({ task_name: "probe", message: "Run pwd." }),
+  };
+  const event = { type: "response.output_item.done", item: call };
+  const rewritten = rewriteNamespaceResponsePayload(event, lookups, "azure-kmamc/gpt-6-sol");
+  assert.deepEqual(rewritten?.item.encrypted_function_args, []);
+  assert.equal(
+    rewriteNamespaceResponsePayload(event, lookups, "gpt-6-sol"),
+    undefined,
+  );
+  const ciphertext = { ...call, arguments: JSON.stringify({ message: "gAAAAAopaque=" }) };
+  assert.equal(
+    rewriteNamespaceResponsePayload(
+      { type: "response.output_item.done", item: ciphertext },
+      lookups,
+      "azure-kmamc/gpt-6-sol",
+    ),
+    undefined,
+  );
+});
+
+test("managed CLIProxy GPT agents wire calls restore the configured collaboration identity", () => {
+  const lookups = buildNamespaceLookups(new Map([
+    ["collaboration", new Set(["spawn_agent", "wait_agent"])],
+  ]));
+  for (const sessionModel of [
+    "cliproxy/gpt-5.6-luna",
+    "cliproxy/gpt-5.6-sol",
+    "cliproxy/gpt-5.6-sol-1m",
+    "cliproxy/gpt-5.6-terra",
+    "cliproxy/gpt-6-luna",
+    "cliproxy/gpt-6-sol",
+    "cliproxy/gpt-6.1-sol",
+    "cliproxy/gpt-6-astra",
+    "cliproxy/gpt-future-canary",
+  ]) {
+    const call = {
+      type: "function_call",
+      namespace: "agents",
+      name: "wait_agent",
+      call_id: "call_wait",
+      arguments: '{"target":"probe"}',
+    };
+    const event = { type: "response.output_item.done", item: call };
+    const normalized = rewriteNamespaceResponsePayload(event, lookups, sessionModel);
+    assert.deepEqual(normalized.item, { ...call, namespace: "collaboration" });
+  }
+});
+
+test("Azure agents wire calls restore the configured collaboration identity", () => {
+  const lookups = buildNamespaceLookups(new Map([
+    ["collaboration", new Set(["spawn_agent", "wait_agent"])],
+  ]));
+  const call = {
+    type: "function_call",
+    namespace: "agents",
+    name: "spawn_agent",
+    call_id: "call_1",
+    arguments: '{"task_name":"probe","message":"Run pwd.","model":"azure-kmamc/gpt-6-luna"}',
+  };
+  const event = { type: "response.output_item.done", item: call };
+  const normalized = rewriteNamespaceResponsePayload(event, lookups, "azure-kmamc/gpt-6-sol");
+
+  assert.deepEqual(normalized.item, {
+    ...call,
+    namespace: "collaboration",
+    encrypted_function_args: [],
+  });
+  const wait = { ...call, name: "wait_agent", arguments: '{"target":"probe"}' };
+  assert.deepEqual(
+    rewriteNamespaceResponsePayload({ ...event, item: wait }, lookups, "azure-kmamc/gpt-6-sol").item,
+    { ...wait, namespace: "collaboration" },
+  );
+  assert.equal(rewriteNamespaceResponsePayload(event, lookups, "gpt-6-sol"), undefined);
+});
 
 function collectBuffer(stream) {
   return new Promise((resolve, reject) => {
@@ -84,7 +178,15 @@ function clientRoutedTools() {
             properties: {
               model: {
                 anyOf: [
-                  { type: "string", enum: ["gpt-5.6-sol", "gpt-5.6-terra"] },
+                  {
+                    type: "string",
+                    enum: [
+                      "gpt-5.6-sol",
+                      "gpt-5.6-terra",
+                      "chatgpt-web/medium",
+                      "chatgpt-web/high",
+                    ],
+                  },
                   { type: "null" },
                 ],
               },
@@ -164,252 +266,150 @@ test("flattenNamespaceTools flattens every namespace, including MCP ones", () =>
   assert.deepEqual([...namespaces.get("mcp__codex_apps__github")], ["fetch_issue"]);
 });
 
-test("turn metadata recovers a namespace Codex flattened before the router", () => {
-  const wireName = "mcp__neon__apm__staging__snapshot__ro__get_monitor_snapshot";
-  const tools = [{ type: "function", name: wireName, parameters: { type: "object" } }];
-  const { namespaces } = flattenNamespaceTools(tools);
-  const clientMetadata = {
-    "x-codex-turn-metadata": JSON.stringify({
-      tool_namespaces_info: {
-        "mcp__neon__apm__staging__snapshot__ro": {
-          name: "mcp__neon__apm__staging__snapshot__ro",
-          functions: {
-            get_monitor_snapshot: {
-              name: "get_monitor_snapshot",
-              direct: true,
-              code_mode_name: null,
-              deferred: false,
-              source: { kind: "mcp", server_name: "neon__apm__staging__snapshot__ro" },
-            },
-          },
-        },
-      },
-    }),
-  };
+function turnToolMetadata(namespace, names, source = { kind: "harness" }) {
+  return { "x-codex-turn-metadata": JSON.stringify({ tool_namespaces_info: {
+    [namespace]: { name: namespace, functions: Object.fromEntries(names.map((name) =>
+      [name, { name, direct: true, source }])) },
+  } }) };
+}
 
-  assert.equal(
-    recoverPreflattenedMcpTools(tools, clientMetadata, namespaces),
-    true,
-  );
-  assert.deepEqual(
-    rewriteNamespaceResponsePayload(
-      {
-        output: [{
-          type: "function_call",
-          name: wireName,
-          call_id: "call_snapshot",
-          arguments: "{}",
-        }],
-      },
-      buildNamespaceLookups(namespaces),
-    ).output[0],
-    {
-      type: "function_call",
-      name: "get_monitor_snapshot",
-      namespace: "mcp__neon__apm__staging__snapshot__ro",
-      call_id: "call_snapshot",
-      arguments: "{}",
-    },
-  );
+test("turn metadata restores directly registered harness and MCP namespaces", () => {
+  for (const [namespace, name, source] of [
+    ["image_gen", "imagegen", { kind: "harness" }],
+    ["clock", "sleep", { kind: "harness" }],
+    ["browser", "open", { kind: "harness" }],
+    ["codex_app", "list_projects", { kind: "harness" }],
+    ["mcp__neon__apm__staging__snapshot__ro", "get_monitor_snapshot",
+      { kind: "mcp", server_name: "neon__apm__staging__snapshot__ro" }],
+  ]) {
+    const wireName = `${namespace}__${name}`;
+    const definition = { type: "function", name: wireName, description: "Client-owned tool.",
+      parameters: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] } };
+    const tools = [definition];
+    const original = structuredClone(tools);
+    const restored = restorePreflattenedToolNamespaces(tools, turnToolMetadata(namespace, [name], source));
+    assert.deepEqual(restored, [{ type: "namespace", name: namespace, tools: [{ ...definition, name }] }]);
+    assert.deepEqual(tools, original, "reconstruction must not mutate the client's definitions");
+    const { namespaces } = flattenNamespaceTools(restored);
+    const call = { type: "function_call", name: wireName, call_id: "call_native", arguments: '{"prompt":"fixture"}' };
+    assert.deepEqual(rewriteNamespaceResponsePayload({ output: [call] }, buildNamespaceLookups(namespaces)).output[0],
+      { ...call, namespace, name });
+  }
 });
 
-test("pre-flattened recovery does not reinterpret an ordinary function collision", () => {
+test("pre-flattened recovery requires unambiguous live direct definitions", () => {
+  const namespace = "image_gen";
+  const name = "imagegen";
+  const wireName = `${namespace}__${name}`;
+  const tools = [{ type: "function", name: wireName }];
+  const registered = JSON.parse(turnToolMetadata(namespace, [name])["x-codex-turn-metadata"]).tool_namespaces_info;
+  const notDirect = structuredClone(registered);
+  notDirect[namespace].functions[name].direct = false;
+  const wrongSource = structuredClone(registered);
+  wrongSource[namespace].functions[name].source = { kind: "mcp", server_name: namespace };
+  const ordinaryCollision = { ...registered,
+    functions: { name: "functions", functions: { [wireName]: { name: wireName } } } };
+  for (const inventory of [{}, notDirect, wrongSource, ordinaryCollision]) {
+    assert.equal(restorePreflattenedToolNamespaces(tools, {
+      "x-codex-turn-metadata": JSON.stringify({ tool_namespaces_info: inventory }),
+    }), tools);
+  }
+  const absent = [];
+  assert.equal(restorePreflattenedToolNamespaces(absent, turnToolMetadata(namespace, [name])), absent,
+    "metadata must not invent unadvertised tools");
+  assert.equal(restorePreflattenedToolNamespaces(tools, {}), tools);
+  const ordinary = [{ type: "function", name: "exec_command" }];
+  assert.equal(restorePreflattenedToolNamespaces(ordinary, turnToolMetadata("functions", ["exec_command"])), ordinary);
+  const explicit = [...tools, { type: "namespace", name: namespace, tools: [{ type: "function", name }] }];
+  assert.equal(restorePreflattenedToolNamespaces(explicit, turnToolMetadata(namespace, [name])), explicit,
+    "an existing native identity must not absorb a conflicting flat declaration");
+});
+
+test("pre-flattened recovery does not reinterpret an ordinary MCP function collision", () => {
   const wireName = "mcp__calendar__create_event";
   const tools = [{ type: "function", name: wireName }];
-  const { namespaces } = flattenNamespaceTools(tools);
-  const clientMetadata = {
-    "x-codex-turn-metadata": JSON.stringify({
-      tool_namespaces_info: {
-        functions: {
-          name: "functions",
-          functions: {
-            [wireName]: {
-              name: wireName,
-              direct: true,
-              source: { kind: "harness" },
-            },
-          },
-        },
-        mcp__calendar: {
-          name: "mcp__calendar",
-          functions: {
-            create_event: {
-              name: "create_event",
-              direct: true,
-              source: { kind: "mcp", server_name: "calendar" },
-            },
-          },
-        },
-      },
-    }),
+  const metadata = JSON.parse(turnToolMetadata("mcp__calendar", ["create_event"],
+    { kind: "mcp", server_name: "calendar" })["x-codex-turn-metadata"]);
+  metadata.tool_namespaces_info.functions = {
+    name: "functions", functions: { [wireName]: { name: wireName, direct: true, source: { kind: "harness" } } },
   };
-
-  assert.equal(
-    recoverPreflattenedMcpTools(tools, clientMetadata, namespaces),
-    false,
-  );
-  assert.equal(namespaces.size, 0);
+  assert.equal(restorePreflattenedToolNamespaces(tools, {
+    "x-codex-turn-metadata": JSON.stringify(metadata),
+  }), tools);
 });
 
 test("pre-flattened recovery fails closed on ambiguous delimiter ownership", () => {
   const tools = [{ type: "function", name: "mcp__calendar__admin__create" }];
-  const { namespaces } = flattenNamespaceTools(tools);
-  const clientMetadata = {
-    "x-codex-turn-metadata": JSON.stringify({
-      tool_namespaces_info: {
-        mcp__calendar: {
-          name: "mcp__calendar",
-          functions: {
-            admin__create: {
-              name: "admin__create",
-              direct: true,
-              source: { kind: "mcp", server_name: "calendar" },
-            },
-          },
-        },
-        mcp__calendar__admin: {
-          name: "mcp__calendar__admin",
-          functions: {
-            create: {
-              name: "create",
-              direct: true,
-              source: { kind: "mcp", server_name: "calendar__admin" },
-            },
-          },
-        },
-      },
-    }),
-  };
-
-  assert.equal(
-    recoverPreflattenedMcpTools(tools, clientMetadata, namespaces),
-    false,
-  );
-  assert.equal(namespaces.size, 0);
+  const inventory = {};
+  for (const [server, name] of [["calendar", "admin__create"], ["calendar__admin", "create"]]) {
+    Object.assign(inventory, JSON.parse(turnToolMetadata(`mcp__${server}`, [name],
+      { kind: "mcp", server_name: server })["x-codex-turn-metadata"]).tool_namespaces_info);
+  }
+  assert.equal(restorePreflattenedToolNamespaces(tools, {
+    "x-codex-turn-metadata": JSON.stringify({ tool_namespaces_info: inventory }),
+  }), tools);
 });
 
-test("pre-flattened recovery transfers a bounded provider alias to the MCP identity", () => {
-  const serverName = "neon__apm__production__snapshot__read_only";
-  const namespace = `mcp__${serverName}`;
-  const name = "get_monitor_snapshot_with_complete_context";
-  const wireName = `${namespace}__${name}`;
-  const flattened = flattenNamespaceTools(
-    [{ type: "function", name: wireName, parameters: { type: "object" } }],
-    { maxNameLength: 64 },
-  );
-  const providerName = flattened.tools[0].name;
-  assert.notEqual(providerName, wireName);
-  assert.ok(providerName.length <= 64);
-
-  assert.equal(
-    recoverPreflattenedMcpTools(
-      flattened.tools,
-      {
-        "x-codex-turn-metadata": JSON.stringify({
-          tool_namespaces_info: {
-            [namespace]: {
-              name: namespace,
-              functions: {
-                [name]: {
-                  name,
-                  direct: true,
-                  source: { kind: "mcp", server_name: serverName },
-                },
-              },
-            },
-          },
-        }),
-      },
-      flattened.namespaces,
-    ),
-    true,
-  );
-  assert.equal(
-    flattenNamespacedHistory(
-      [{ type: "function_call", namespace, name, call_id: "call_history", arguments: "{}" }],
-      flattened.namespaces,
-    )[0].name,
-    providerName,
-  );
-  assert.deepEqual(
-    rewriteNamespaceResponsePayload(
-      {
-        output: [{
-          type: "function_call",
-          name: providerName,
-          call_id: "call_live",
-          arguments: "{}",
-        }],
-      },
-      buildNamespaceLookups(flattened.namespaces),
-    ).output[0],
-    {
-      type: "function_call",
-      namespace,
-      name,
-      call_id: "call_live",
-      arguments: "{}",
-    },
-  );
+test("restored MCP identities retain bounded and collision-only provider aliases", () => {
+  for (const [serverName, name, options] of [
+    ["neon__apm__production__snapshot__read_only", "get_monitor_snapshot_with_complete_context", { maxNameLength: 64 }],
+    ["calendar", "create_event", { aliasCollisions: true }],
+  ]) {
+    const namespace = `mcp__${serverName}`;
+    const wireName = `${namespace}__${name}`;
+    const tools = [{ type: "function", name: wireName, parameters: { type: "object" } }];
+    const restored = restorePreflattenedToolNamespaces(tools,
+      turnToolMetadata(namespace, [name], { kind: "mcp", server_name: serverName }));
+    const flattened = flattenNamespaceTools(restored, options);
+    const providerName = flattened.tools[0].name;
+    if (options.maxNameLength) {
+      assert.notEqual(providerName, wireName);
+      assert.ok(providerName.length <= 64);
+    } else assert.equal(providerName, wireName);
+    const call = { type: "function_call", namespace, name, call_id: "call_history", arguments: "{}" };
+    assert.equal(flattenNamespacedHistory([call], flattened.namespaces)[0].name, providerName);
+    const { namespace: _namespace, ...providerCall } = call;
+    assert.deepEqual(rewriteNamespaceResponsePayload({ output: [{ ...providerCall, name: providerName }] },
+      buildNamespaceLookups(flattened.namespaces)).output[0], call);
+  }
 });
 
-test("pre-flattened recovery transfers collision-only alias ownership", () => {
-  const namespace = "mcp__calendar";
-  const name = "create_event";
-  const wireName = `${namespace}__${name}`;
-  const flattened = flattenNamespaceTools(
-    [{ type: "function", name: wireName }],
-    { aliasCollisions: true },
-  );
-  assert.equal(flattened.tools[0].name, wireName);
-  assert.equal(
-    recoverPreflattenedMcpTools(
-      flattened.tools,
-      {
-        "x-codex-turn-metadata": JSON.stringify({
-          tool_namespaces_info: {
-            [namespace]: {
-              name: namespace,
-              functions: {
-                [name]: {
-                  name,
-                  direct: true,
-                  source: { kind: "mcp", server_name: "calendar" },
-                },
-              },
-            },
-          },
-        }),
-      },
-      flattened.namespaces,
-    ),
-    true,
-  );
-  assert.equal(
-    flattenNamespacedHistory(
-      [{ type: "function_call", namespace, name, call_id: "call_history", arguments: "{}" }],
-      flattened.namespaces,
-    )[0].name,
-    wireName,
-  );
-  const restored = rewriteNamespaceResponsePayload(
-    {
-      output: [{
-        type: "function_call",
-        name: wireName,
-        call_id: "call_live",
-        arguments: "{}",
-      }],
-    },
-    buildNamespaceLookups(flattened.namespaces),
-  ).output[0];
-  assert.deepEqual(
-    { namespace: restored.namespace, name: restored.name },
-    { namespace, name },
-  );
+test("restored app tools group once and preserve client schemas before expansion", () => {
+  const definitions = ["list_projects", "create_thread"].map((name) => ({
+    type: "function", name: `codex_app__${name}`, description: `Current ${name} contract`,
+    parameters: { type: "object", properties: { clientOnly: { type: "string" } }, required: ["clientOnly"] },
+  }));
+  const restored = restorePreflattenedToolNamespaces(definitions,
+    turnToolMetadata("codex_app", ["list_projects", "create_thread"]));
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].tools.length, 2);
+  const expanded = mergeCodexAppTools(restored).tools;
+  const app = expanded.filter((tool) => tool.type === "namespace" && tool.name === "codex_app");
+  assert.equal(app.length, 1);
+  assert.equal(new Set(app[0].tools.map((tool) => tool.name)).size, app[0].tools.length);
+  for (const definition of definitions) {
+    const name = definition.name.slice("codex_app__".length);
+    assert.deepEqual(app[0].tools.find((tool) => tool.name === name), { ...definition, name });
+  }
 });
 
-test("pre-flattened recovery rejects malformed, duplicated, and non-MCP metadata", () => {
+test("restored collaboration tools derive spawn model validation from parameters", () => {
+  const definition = { type: "function", name: "collaboration__spawn_agent", parameters: {
+    type: "object", properties: { model: { type: "string", enum: ["deepseek/deepseek-flash"] }, message: { type: "string" } },
+  } };
+  const restored = restorePreflattenedToolNamespaces([definition], turnToolMetadata("collaboration", ["spawn_agent"]));
+  const { namespaces } = flattenNamespaceTools(restored);
+  const lookups = buildNamespaceLookups(namespaces);
+  for (const model of ["deepseek/deepseek-flash", "unavailable-model"]) {
+    const call = { type: "function_call", name: definition.name, arguments: JSON.stringify({ model, message: "bounded task" }) };
+    const output = rewriteNamespaceResponsePayload({ output: [call] }, lookups).output[0];
+    assert.equal(output.namespace, "collaboration");
+    assert.equal(output.name, "spawn_agent");
+    assert.deepEqual(JSON.parse(output.arguments), model === "unavailable-model" ? { message: "bounded task" } : { model, message: "bounded task" });
+  }
+});
+
+test("pre-flattened recovery rejects malformed, duplicated, and mismatched-source metadata", () => {
   const namespace = "mcp__calendar";
   const name = "create_event";
   const wireName = `${namespace}__${name}`;
@@ -467,16 +467,11 @@ test("pre-flattened recovery rejects malformed, duplicated, and non-MCP metadata
 
   for (const encoded of cases) {
     const toolName = encoded.includes("codex_app") ? "codex_app__create_thread" : wireName;
-    const { namespaces } = flattenNamespaceTools([{ type: "function", name: toolName }]);
+    const tools = [{ type: "function", name: toolName }];
     assert.equal(
-      recoverPreflattenedMcpTools(
-        [{ type: "function", name: toolName }],
-        { "x-codex-turn-metadata": encoded },
-        namespaces,
-      ),
-      false,
+      restorePreflattenedToolNamespaces(tools, { "x-codex-turn-metadata": encoded }),
+      tools,
     );
-    assert.equal(namespaces.size, 0);
   }
 });
 
@@ -2255,6 +2250,7 @@ test("tool_search response bridge suppresses function argument events across its
         type: "function_call",
         id: "fc_search_1",
         name: "tool_search",
+        namespace: null,
         call_id: "search-1",
         arguments: "",
       },
@@ -2277,6 +2273,7 @@ test("tool_search response bridge suppresses function argument events across its
         type: "function_call",
         id: "fc_search_1",
         name: "tool_search",
+        namespace: null,
         call_id: "search-1",
         arguments: '{"query":"calendar","limit":2.0}',
       },
@@ -2290,6 +2287,7 @@ test("tool_search response bridge suppresses function argument events across its
             type: "function_call",
             id: "fc_search_1",
             name: "tool_search",
+            namespace: null,
             call_id: "search-1",
             arguments: '{"query":"calendar","limit":2}',
           },
@@ -2329,6 +2327,32 @@ test("tool_search response bridge suppresses function argument events across its
     arguments: { query: "calendar", limit: 2 },
   });
   assert.doesNotMatch(output, /response\.function_call_arguments/u);
+});
+
+test("tool_search response bridge treats provider namespace null as unqualified", () => {
+  const { namespaces } = flattenNamespaceTools([clientToolSearchControl()]);
+  const rewritten = rewriteNamespaceResponsePayload(
+    {
+      output: [{
+        type: "function_call",
+        id: "fc_search_null",
+        name: "tool_search",
+        namespace: null,
+        call_id: "search-null",
+        arguments: '{"query":"calendar"}',
+        status: "completed",
+      }],
+    },
+    buildNamespaceLookups(namespaces),
+  );
+  assert.deepEqual(rewritten?.output?.[0], {
+    type: "tool_search_call",
+    id: "fc_search_null",
+    call_id: "search-null",
+    status: "completed",
+    execution: "client",
+    arguments: { query: "calendar" },
+  });
 });
 
 test("tool_search response bridge fails closed without native control or valid arguments", () => {
@@ -2411,7 +2435,7 @@ test("response transform restores namespace on unambiguous unprefixed calls", as
   assert.match(output, /"namespace":"codex_app"/);
 });
 
-test("response transform pins spawn-agent model overrides to the routed parent", async () => {
+test("response transform pins only an unadvertised spawn-agent override to the routed parent", async () => {
   const { namespaces } = flattenNamespaceTools(clientRoutedTools());
   const lookups = buildNamespaceLookups(namespaces);
   const invalid = rewriteNamespaceResponsePayload(
@@ -2463,7 +2487,9 @@ test("response transform pins spawn-agent model overrides to the routed parent",
     model: "opencode-go/deepseek-v4-flash",
   });
 
-  const allowedButCrossProvider = rewriteNamespaceResponsePayload(
+  // The client advertised this model, so it is a deliberate delegation target
+  // and survives a routed parent instead of being pinned back to it.
+  const advertisedCrossProvider = rewriteNamespaceResponsePayload(
     {
       output: [
         {
@@ -2476,9 +2502,170 @@ test("response transform pins spawn-agent model overrides to the routed parent",
     lookups,
     "opencode-go/deepseek-v4-flash",
   );
-  assert.deepEqual(JSON.parse(allowedButCrossProvider.output[0].arguments), {
+  assert.deepEqual(JSON.parse(advertisedCrossProvider.output[0].arguments), {
     message: "verify",
-    model: "opencode-go/deepseek-v4-flash",
+    model: "gpt-5.6-terra",
+  });
+});
+
+function sameFamilySessionRoutingContext({ maxChildTier = 2, diagnostics = [] } = {}) {
+  const medium = {
+    slug: "chatgpt-web/medium",
+    provider: "chatgpt-web",
+    upstreamModel: "chatgpt-web/medium",
+    multiAgentVersion: "v2",
+    subagentFamilyId: "chatgpt-web/sol",
+    subagentTier: 1,
+    reasoningLevels: [{ effort: "medium" }],
+  };
+  const high = {
+    slug: "chatgpt-web/high",
+    provider: "chatgpt-web",
+    upstreamModel: "chatgpt-web/high",
+    multiAgentVersion: "v2",
+    subagentFamilyId: "chatgpt-web/sol",
+    subagentTier: 2,
+    reasoningLevels: [{ effort: "high" }],
+  };
+  const foreign = {
+    slug: "other/high",
+    provider: "other",
+    upstreamModel: "other/high",
+    multiAgentVersion: "v2",
+    subagentFamilyId: "other/family",
+    subagentTier: 0,
+    reasoningLevels: [{ effort: "high" }],
+  };
+  return {
+    parentRoute: medium,
+    policy: "same-family",
+    maxChildTier,
+    routesBySlug: new Map([
+      [medium.slug, medium],
+      [high.slug, high],
+      ["chatgpt-web/high-alias", high],
+      [foreign.slug, foreign],
+    ]),
+    agentTypeRoutes: new Map([
+      ["router_chatgpt_web_high", high],
+      ["router_other_high", foreign],
+    ]),
+    onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+  };
+}
+
+test("same-family response transform retains an eligible canonical child model and validates its effort", () => {
+  const { namespaces } = flattenNamespaceTools(clientRoutedTools());
+  const context = sameFamilySessionRoutingContext();
+  const rewritten = rewriteNamespaceResponsePayload(
+    {
+      output: [{
+        type: "function_call",
+        name: "collaboration__spawn_agent",
+        arguments: JSON.stringify({
+          message: "verify",
+          model: "chatgpt-web/high-alias",
+          reasoning_effort: "high",
+        }),
+      }],
+    },
+    buildNamespaceLookups(namespaces),
+    context,
+  );
+  assert.deepEqual(JSON.parse(rewritten.output[0].arguments), {
+    message: "verify",
+    model: "chatgpt-web/high",
+    reasoning_effort: "high",
+  });
+});
+
+test("same-family response transform pins denied direct and agent-type child routes to the parent", () => {
+  const { namespaces } = flattenNamespaceTools(clientRoutedTools());
+  const diagnostics = [];
+  const context = sameFamilySessionRoutingContext({ diagnostics });
+  const rewritten = rewriteNamespaceResponsePayload(
+    {
+      output: [
+        {
+          type: "function_call",
+          name: "collaboration__spawn_agent",
+          arguments: JSON.stringify({ message: "direct", model: "other/high" }),
+        },
+        {
+          type: "function_call",
+          name: "collaboration__spawn_agent",
+          arguments: JSON.stringify({ message: "agent", agent_type: "router_other_high" }),
+        },
+      ],
+    },
+    buildNamespaceLookups(namespaces),
+    context,
+  );
+  assert.deepEqual(JSON.parse(rewritten.output[0].arguments), {
+    message: "direct",
+    model: "chatgpt-web/medium",
+  });
+  assert.deepEqual(JSON.parse(rewritten.output[1].arguments), {
+    message: "agent",
+    model: "chatgpt-web/medium",
+  });
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["SUBAGENT_MODEL_FAMILY_DENIED", "SUBAGENT_MODEL_FAMILY_DENIED"],
+  );
+});
+
+test("same-family denial does not carry an effort unsupported by the fallback parent", () => {
+  const { namespaces } = flattenNamespaceTools(clientRoutedTools());
+  const diagnostics = [];
+  const rewritten = rewriteNamespaceResponsePayload(
+    {
+      output: [{
+        type: "function_call",
+        name: "collaboration__spawn_agent",
+        arguments: JSON.stringify({
+          message: "verify",
+          model: "chatgpt-web/high",
+          reasoning_effort: "high",
+        }),
+      }],
+    },
+    buildNamespaceLookups(namespaces),
+    sameFamilySessionRoutingContext({ maxChildTier: 1, diagnostics }),
+  );
+  assert.deepEqual(JSON.parse(rewritten.output[0].arguments), {
+    message: "verify",
+    model: "chatgpt-web/medium",
+  });
+  assert.equal(diagnostics[0].code, "SUBAGENT_MODEL_TIER_DENIED");
+});
+
+test("same-family stream transform resolves agent_type to a canonical direct child without a bypass", async () => {
+  const event = {
+    type: "response.output_item.done",
+    item: {
+      type: "function_call",
+      namespace: "collaboration",
+      name: "spawn_agent",
+      call_id: "call_agent_type",
+      arguments: JSON.stringify({
+        message: "verify",
+        agent_type: "router_chatgpt_web_high",
+        reasoning_effort: "high",
+      }),
+    },
+  };
+  const transform = new NamespaceToolCallTransform(
+    new Map(),
+    "text/event-stream",
+    sameFamilySessionRoutingContext(),
+  );
+  const output = await collect(Readable.from([`data: ${JSON.stringify(event)}\n\n`]).pipe(transform));
+  const payload = JSON.parse(output.toString("utf8").trim().slice(5));
+  assert.deepEqual(JSON.parse(payload.item.arguments), {
+    message: "verify",
+    model: "chatgpt-web/high",
+    reasoning_effort: "high",
   });
 });
 
@@ -2536,6 +2723,30 @@ test("Responses-native stream keeps an omitted spawn-agent model on its routed p
     message: "verify",
     model: "opencode-go/deepseek-v4-flash",
   });
+});
+
+test("Azure routed spawn leaves an omitted model for Codex's configured subagent default", () => {
+  const lookups = buildNamespaceLookups(new Map([
+    ["collaboration", new Set(["spawn_agent"])],
+  ]));
+  const call = {
+    type: "function_call",
+    namespace: "agents",
+    name: "spawn_agent",
+    call_id: "call_azure_default",
+    arguments: '{"task_name":"curated_luna","message":"Run pwd."}',
+  };
+  const rewritten = rewriteNamespaceResponsePayload(
+    { type: "response.output_item.done", item: call },
+    lookups,
+    "azure-kmamc/gpt-6-sol",
+  );
+  assert.equal(rewritten.item.namespace, "collaboration");
+  assert.deepEqual(JSON.parse(rewritten.item.arguments), {
+    task_name: "curated_luna",
+    message: "Run pwd.",
+  });
+  assert.deepEqual(rewritten.item.encrypted_function_args, []);
 });
 
 test("response transform detects headerless SSE after split framing prelude", async () => {
@@ -3801,6 +4012,38 @@ test("repairToolSchemaRoots returns the original array when nothing needs repair
   assert.equal(repairToolSchemaRoots(tools), tools);
 });
 
+test("anthropicFunctionTools keeps named functions and drops hosted/custom leftovers", () => {
+  const ordinary = {
+    type: "function",
+    name: "exec_command",
+    parameters: { type: "object", properties: {} },
+  };
+  const nested = {
+    type: "function",
+    function: { name: "nested", parameters: { type: "object", properties: { a: { type: "string" } } } },
+  };
+  const schemaOnly = { name: "schema_only", inputSchema: { type: "object", properties: { q: { type: "number" } } } };
+  const nameless = { type: "function", parameters: { type: "object" } };
+  const hosted = { type: "web_search", search_context_size: "medium" };
+  const custom = { type: "custom", name: "apply_patch" };
+  const noSchema = { type: "function", name: "bare" };
+  const tools = [ordinary, nested, schemaOnly, nameless, hosted, custom, noSchema];
+  const sanitized = anthropicFunctionTools(tools);
+  assert.notEqual(sanitized, tools);
+  assert.deepEqual(sanitized.map((tool) => tool.name), ["exec_command", "nested", "schema_only", "bare"]);
+  assert.ok(sanitized.every((tool) => tool.type === "function"));
+  assert.ok(sanitized.every((tool) => tool.parameters && typeof tool.parameters === "object" && !Array.isArray(tool.parameters)));
+  assert.equal(sanitized[0], ordinary);
+  assert.deepEqual(sanitized[1].parameters.properties, { a: { type: "string" } });
+  assert.deepEqual(sanitized[2].parameters.properties, { q: { type: "number" } });
+  assert.deepEqual(sanitized[3].parameters, { type: "object", properties: {} });
+});
+
+test("anthropicFunctionTools returns the original array when every tool is already valid", () => {
+  const tools = [{ type: "function", name: "fine", parameters: { type: "object", properties: {} } }];
+  assert.equal(anthropicFunctionTools(tools), tools);
+});
+
 test("OpenCode search repair strips only search_content_types on web_search", () => {
   const webSearch = {
     type: "web_search",
@@ -3847,6 +4090,66 @@ test("OpenCode input repair preserves collaboration text and inherited images", 
   assert.deepEqual(compatible[0].content[0], agent.content[0]);
   assert.equal(compatible[0].content[1].image_url, "data:image/png;base64,AAA");
   assert.equal(compatible[0].content[1].detail, "auto");
+});
+
+// OpenCode Console 400s Muse Free follow-ups that replay Meta-issued
+// reasoning encrypted_content: "was not issued to this caller". Drop the
+// continuation token, keep visible summary text, and leave unrelated items
+// by identity.
+test("OpenCode reasoning repair drops encrypted_content Console did not issue", () => {
+  const user = { type: "message", role: "user", content: "hi" };
+  const withSummary = {
+    type: "reasoning",
+    id: "rs_1",
+    encrypted_content: "gAAAAAforeign",
+    summary: [{ type: "summary_text", text: "thought" }],
+  };
+  const tokenOnly = {
+    type: "reasoning",
+    id: "rs_2",
+    encrypted_content: "gAAAAAforeign2",
+  };
+  const untouched = {
+    type: "reasoning",
+    id: "rs_3",
+    summary: [{ type: "summary_text", text: "kept" }],
+  };
+  const input = [user, withSummary, tokenOnly, untouched];
+  const stripped = stripUnissuedEncryptedReasoning(input);
+  assert.notEqual(stripped, input);
+  assert.deepEqual(stripped, [
+    user,
+    {
+      type: "reasoning",
+      id: "rs_1",
+      summary: [{ type: "summary_text", text: "thought" }],
+    },
+    untouched,
+  ]);
+  assert.equal(stripped[2], untouched);
+});
+
+test("OpenCode reasoning repair leaves input without encrypted_content by identity", () => {
+  const input = [{ type: "message", role: "user", content: "hi" }];
+  assert.equal(stripUnissuedEncryptedReasoning(input), input);
+  assert.equal(stripUnissuedEncryptedReasoning("plain"), "plain");
+});
+
+test("OpenCode include repair drops reasoning.encrypted_content", () => {
+  assert.deepEqual(
+    stripUnissuedEncryptedReasoningInclude([
+      "file_search_call.results",
+      "reasoning.encrypted_content",
+    ]),
+    ["file_search_call.results"],
+  );
+  assert.equal(
+    stripUnissuedEncryptedReasoningInclude(["reasoning.encrypted_content"]),
+    undefined,
+  );
+  const include = ["file_search_call.results"];
+  assert.equal(stripUnissuedEncryptedReasoningInclude(include), include);
+  assert.equal(stripUnissuedEncryptedReasoningInclude(undefined), undefined);
 });
 
 // Codex ships apply_patch as a custom tool whose lark grammar is the only
@@ -3917,15 +4220,118 @@ test("custom-tool bridge maps apply_patch definitions and paired history lossles
   assert.deepEqual(bridged.tools[1], ordinary);
   assert.deepEqual(bridged.toolChoice, { type: "function", name: "apply_patch" });
   assert.deepEqual(bridged.input[0], {
-    id: "ctc_1",
     call_id: "call_patch_1",
     type: "function_call",
     name: "apply_patch",
     arguments: JSON.stringify({ input: patch }),
   });
   assert.equal(bridged.input[1].type, "function_call_output");
+  assert.equal(Object.hasOwn(bridged.input[1], "id"), false);
+  assert.equal(bridged.input[1].call_id, "call_patch_1");
   assert.deepEqual(bridged.input[2], unrelatedCall);
   assert.equal(buildNamespaceLookups(namespaces).customTools.get("apply_patch"), "apply_patch");
+});
+
+const GROK_46_ROUTE = { slug: GROK_APPLY_PATCH_GUIDANCE_ROUTE };
+const GROK_45_ROUTE = { slug: "grok-oauth/grok-4.5" };
+const GROK_API_46_ROUTE = { slug: "grok-api/grok-4.6" };
+const COMMANDCODE_46_ROUTE = { slug: "commandcode/grok-4.6" };
+
+function nativeApplyPatch(extra = {}) {
+  return {
+    type: "custom",
+    name: APPLY_PATCH_TOOL_NAME,
+    format: { type: "grammar", syntax: "lark", definition: V4A_GRAMMAR },
+    ...extra,
+  };
+}
+
+test("Grok 4.6 OAuth appends V4A examples to native custom apply_patch before translation", () => {
+  assert.equal(GROK_APPLY_PATCH_GUIDANCE.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
+  const description = "Apply a patch.";
+  const ordinary = { type: "function", name: APPLY_PATCH_TOOL_NAME, parameters: { type: "object" } };
+  const otherCustom = { type: "custom", name: "future_custom", description: "leave me" };
+  const tools = [nativeApplyPatch({ description }), ordinary, otherCustom];
+  const originalFormat = tools[0].format;
+  const input = [
+    {
+      type: "custom_tool_call",
+      id: "ctc_keep",
+      call_id: "call_keep",
+      name: APPLY_PATCH_TOOL_NAME,
+      input: "*** Begin Patch\n*** End Patch",
+    },
+  ];
+  const annotated = applyGrokApplyPatchGuidance(tools, GROK_46_ROUTE);
+  assert.notEqual(annotated, tools);
+  assert.equal(annotated[0].type, "custom");
+  assert.equal(annotated[0].name, APPLY_PATCH_TOOL_NAME);
+  assert.equal(annotated[0].description.startsWith(description), true);
+  assert.equal(annotated[0].description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
+  assert.equal(annotated[0].description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE), true);
+  assert.equal(annotated[0].description.includes(GROK_APPLY_PATCH_UPDATE_EXAMPLE), true);
+  assert.doesNotMatch(annotated[0].description, /```/);
+  assert.equal(annotated[0].format, originalFormat);
+  assert.deepEqual(annotated[0].format, {
+    type: "grammar",
+    syntax: "lark",
+    definition: V4A_GRAMMAR,
+  });
+  assert.deepEqual(annotated[1], ordinary);
+  assert.deepEqual(annotated[2], otherCustom);
+  assert.deepEqual(input, [
+    {
+      type: "custom_tool_call",
+      id: "ctc_keep",
+      call_id: "call_keep",
+      name: APPLY_PATCH_TOOL_NAME,
+      input: "*** Begin Patch\n*** End Patch",
+    },
+  ]);
+
+  const bridged = bridgeCustomTools(annotated, input, new Map());
+  assert.equal(bridged.tools[0].name, "codex_custom_apply_patch");
+  assert.deepEqual(bridged.tools[1], ordinary);
+  assert.ok(bridged.tools[0].description.includes(V4A_GRAMMAR));
+  assert.ok(bridged.tools[0].description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE));
+  assert.equal(Object.hasOwn(bridged.input[0], "id"), false);
+  assert.equal(bridged.input[0].call_id, "call_keep");
+  assert.equal(bridged.input[0].name, "codex_custom_apply_patch");
+  assert.deepEqual(JSON.parse(bridged.input[0].arguments), {
+    input: "*** Begin Patch\n*** End Patch",
+  });
+});
+
+test("Grok apply_patch guidance is idempotent and ignores a same-named ordinary function", () => {
+  const ordinary = { type: "function", name: APPLY_PATCH_TOOL_NAME, parameters: { type: "object" } };
+  const native = nativeApplyPatch();
+  const originalFormat = native.format;
+  const once = applyGrokApplyPatchGuidance([ordinary, native], GROK_46_ROUTE);
+  assert.deepEqual(once[0], ordinary);
+  assert.equal(once[1].format, originalFormat);
+  assert.deepEqual(once[1].format, originalFormat);
+  const twice = applyGrokApplyPatchGuidance(once, GROK_46_ROUTE);
+  assert.equal(twice, once);
+  assert.equal(twice[1].description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
+  assert.equal(
+    twice[1].description.split(GROK_APPLY_PATCH_GUIDANCE_MARKER).length - 1,
+    1,
+  );
+});
+
+test("Grok apply_patch guidance is confined to grok-oauth/grok-4.6", () => {
+  const tools = [nativeApplyPatch({ description: "Apply a patch." })];
+  for (const route of [GROK_45_ROUTE, GROK_API_46_ROUTE, COMMANDCODE_46_ROUTE, undefined]) {
+    assert.equal(applyGrokApplyPatchGuidance(tools, route), tools);
+  }
+});
+
+test("a delimiter reminder in the original description does not suppress the examples", () => {
+  const tools = [nativeApplyPatch({ description: GROK_APPLY_PATCH_GUIDANCE_MARKER })];
+  const guided = applyGrokApplyPatchGuidance(tools, GROK_46_ROUTE);
+  assert.ok(guided[0].description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE));
+  assert.ok(guided[0].description.includes(GROK_APPLY_PATCH_UPDATE_EXAMPLE));
+  assert.equal(applyGrokApplyPatchGuidance(guided, GROK_46_ROUTE), guided);
 });
 
 test("custom-tool bridge avoids hijacking an ordinary apply_patch function", () => {
@@ -4098,6 +4504,54 @@ test("strict custom bridging covers non-apply_patch definitions, history, and ch
   assert.equal(bridged.input[0].type, "function_call");
   assert.deepEqual(JSON.parse(bridged.input[0].arguments), { input: "opaque" });
   assert.equal(bridged.input[1].type, "function_call_output");
+});
+
+test("custom-tool bridge omits non-fc item ids on the rewritten function pair", () => {
+  const flattened = flattenNamespaceTools([], { maxNameLength: 64 });
+  const bridged = bridgeCustomTools(
+    [{ type: "custom", name: "apply_patch" }],
+    [
+      {
+        type: "custom_tool_call",
+        id: "ctc_patch",
+        name: "apply_patch",
+        call_id: "call_patch",
+        input: "*** Begin Patch\n*** End Patch",
+      },
+      {
+        type: "custom_tool_call_output",
+        id: "ctco_patch",
+        call_id: "call_patch",
+        output: "Done!",
+      },
+      {
+        type: "custom_tool_call",
+        id: "fc_keep",
+        name: "apply_patch",
+        call_id: "call_keep",
+        input: "*** Begin Patch\n*** End Patch",
+      },
+      {
+        type: "custom_tool_call_output",
+        id: "fc_keep_out",
+        call_id: "call_keep",
+        output: "Done!",
+      },
+    ],
+    flattened.namespaces,
+    undefined,
+    ["apply_patch"],
+    { maxNameLength: 64, bridgeAll: true },
+  );
+  const patchCall = bridged.input.find((item) => item.call_id === "call_patch" && item.type === "function_call");
+  const patchOutput = bridged.input.find((item) => item.call_id === "call_patch" && item.type === "function_call_output");
+  const keptCall = bridged.input.find((item) => item.call_id === "call_keep" && item.type === "function_call");
+  const keptOutput = bridged.input.find((item) => item.call_id === "call_keep" && item.type === "function_call_output");
+  assert.equal(Object.hasOwn(patchCall, "id"), false);
+  assert.equal(Object.hasOwn(patchOutput, "id"), false);
+  assert.equal(patchOutput.call_id, "call_patch");
+  assert.equal(keptCall.id, "fc_keep");
+  assert.equal(keptOutput.id, "fc_keep_out");
 });
 
 test("custom-tool bridge reserves native namespace names and restores the aliased call", () => {
@@ -4317,6 +4771,84 @@ test("native custom-tool legacy arguments still fail closed when streamed input 
   );
   assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
   assert.match(error.message, /custom tool argument deltas disagree with completed input/u);
+});
+
+function litellmNativeCustomEvents(id, argumentsText, completedInput) {
+  return [
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { type: "custom_tool_call", id, call_id: id, name: "apply_patch", status: "in_progress", input: "" },
+    },
+    ...[...argumentsText].map((delta) => ({
+      type: "response.function_call_arguments.delta",
+      item_id: id,
+      output_index: 0,
+      delta,
+    })),
+    { type: "response.function_call_arguments.done", item_id: id, output_index: 0, arguments: argumentsText },
+    {
+      type: "response.output_item.done",
+      output_index: 0,
+      item: { type: "custom_tool_call", id, call_id: id, name: "apply_patch", status: "completed", input: completedInput },
+    },
+  ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+}
+
+// LiteLLM 1.96 unwrap_custom_tool_arguments(): a string `content` from a JSON
+// object, otherwise the provider arguments verbatim. Each case pairs the
+// provider arguments with the input LiteLLM puts on the completed item.
+const PATCH_FIXTURE = "*** Begin Patch\n*** Update File: src/a.js\n@@\n-const a = 1;\n+const re = /\\d+/;\n*** End Patch";
+
+test("native custom-tool arguments LiteLLM keeps verbatim relay as its completed input", async () => {
+  for (const [name, argumentsText, completedInput] of [
+    ["content after another key", JSON.stringify({ path: "src/a.js", content: PATCH_FIXTURE }), PATCH_FIXTURE],
+    ["input key instead of content", JSON.stringify({ input: PATCH_FIXTURE }), JSON.stringify({ input: PATCH_FIXTURE })],
+    ["empty object", "{}", "{}"],
+    ["raw patch text", PATCH_FIXTURE, PATCH_FIXTURE],
+    ["bare JSON string", JSON.stringify(PATCH_FIXTURE), JSON.stringify(PATCH_FIXTURE)],
+  ]) {
+    const id = `call_${name.replaceAll(" ", "_")}`;
+    const output = await collect(
+      Readable.from(litellmNativeCustomEvents(id, argumentsText, completedInput))
+        .pipe(new NamespaceToolCallTransform(new Map(), "text/event-stream")),
+    );
+    const payloads = output.split(/\n\n/).filter(Boolean)
+      .map((block) => JSON.parse(block.split("\n").find((line) => line.startsWith("data: ")).slice(6)));
+    assert.equal(
+      payloads.find((event) => event.type === "response.custom_tool_call_input.done")?.input,
+      completedInput,
+      name,
+    );
+    assert.equal(payloads.at(-1).item.input, completedInput, name);
+    // The decoder follows only a leading content wrapper; nothing it could not
+    // decode reaches the client as streamed input.
+    assert.equal(
+      payloads.some((event) => event.type === "response.custom_tool_call_input.delta"),
+      false,
+      name,
+    );
+    assert.doesNotMatch(output, /response\.function_call_arguments/u, name);
+  }
+});
+
+test("native custom-tool arguments still fail closed where LiteLLM's input cannot be matched", async () => {
+  for (const [name, argumentsText, completedInput, reason] of [
+    // Python str() of a non-string content has no faithful JavaScript form.
+    ["non-string content", JSON.stringify({ content: null }), "None", /invalid custom tool arguments done/u],
+    // The completed item must carry the input the relay already committed.
+    ["completed item disagrees", JSON.stringify({ input: "one" }), "two", /custom tool call input changed before close/u],
+    // Decoded text already streamed cannot be contradicted by the final input.
+    ["streamed text then invalid", '{"content": "*** Begin Patch"}', '{"content": "*** Begin Patch"}',
+      /incomplete custom tool argument delta sequence/u],
+  ]) {
+    const { error } = await collectUntilPipelineError(
+      litellmNativeCustomEvents(`call_${name.replaceAll(" ", "_")}`, argumentsText, completedInput),
+      new NamespaceToolCallTransform(new Map(), "text/event-stream"),
+    );
+    assert.equal(error?.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM", name);
+    assert.match(error.message, reason, name);
+  }
 });
 
 test("a bridged custom tool without a grammar carries only what it was given", () => {

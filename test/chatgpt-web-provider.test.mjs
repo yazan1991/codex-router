@@ -36,7 +36,13 @@ const {
   directResponsesHeaders,
   directResponsesTarget,
 } = await import("../src/direct-responses-provider.mjs");
-const { modelIds } = await import("../src/model-discovery.mjs");
+const {
+  discoverProviderModels,
+  modelIds,
+  providerDiscoveryIdentityFingerprint,
+  providerCatalogRequest,
+} = await import("../src/model-discovery.mjs");
+const { writeProviderCatalogCache } = await import("../src/model-catalog-cache.mjs");
 const { MODEL_BY_SLUG, PROVIDERS } = await import("../src/model-registry.mjs");
 const { routedClientModels } = await import("../src/routed-client-models.mjs");
 const { userModelIdentity } = await import("../src/user-models.mjs");
@@ -55,18 +61,98 @@ test("ChatGPT Web is an explicit Codex-only direct Responses provider", () => {
   );
 });
 
-test("ChatGPT Web discovery accepts a Codex catalog and withholds native rows", () => {
+test("ChatGPT Web discovery accepts the current CGW catalog and withholds non-provider rows", async () => {
+  const expected = [
+    "chatgpt-web/light",
+    "chatgpt-web/medium",
+    "chatgpt-web/high",
+    "chatgpt-web/extra-high",
+    "chatgpt-web/pro",
+  ];
   const payload = {
-    models: [
-      { slug: "gpt-5.6-sol", display_name: "GPT-5.6 Sol" },
-      { slug: "chatgpt-web/light", display_name: "ChatGPT Web — Instant" },
-      { slug: "chatgpt-web/high", display_name: "ChatGPT Web — High" },
+    object: "list",
+    data: [
+      ...expected.map((id) => ({
+        id,
+        object: "model",
+        display_name: `CGW ${id.split("/")[1]}`,
+        context_window: 128_000,
+        input_modalities: ["text", "image"],
+      })),
+      { id: "gpt-6-astra", display_name: "Native row must stay out" },
+      { id: "attacker/arbitrary", display_name: "Arbitrary row must stay out" },
     ],
   };
-  assert.deepEqual(modelIds(payload, PROVIDERS.get("chatgpt-web")), [
-    "chatgpt-web/high",
-    "chatgpt-web/light",
-  ]);
+  assert.deepEqual(modelIds(payload, PROVIDERS.get("chatgpt-web")), [...expected].sort());
+
+  const result = await discoverProviderModels("chatgpt-web", {
+    cache: false,
+    refresh: true,
+    loadPayload: async () => payload,
+  });
+  assert.deepEqual(result.discovered, [...expected].sort());
+  assert.deepEqual(
+    result.contextLengths,
+    Object.fromEntries(expected.map((id) => [id, 128_000])),
+  );
+  assert.equal(result.modelMetadata.length, expected.length);
+  assert.ok(result.modelMetadata.every((model) => model.upstreamId.startsWith("chatgpt-web/")));
+  const medium = result.modelMetadata.find((model) => model.upstreamId === "chatgpt-web/medium");
+  assert.equal(medium.displayName, "CGW medium");
+  assert.equal(medium.contextWindow, 128_000);
+  assert.deepEqual(medium.inputModalities, ["text", "image"]);
+});
+
+test("ChatGPT Web discovery alone uses its unauthenticated local endpoint", async () => {
+  const identity = {
+    baseUrl: "http://127.0.0.1:17841/v1",
+    credential: { value: "local" },
+  };
+  assert.deepEqual(await providerCatalogRequest(PROVIDERS.get("chatgpt-web"), identity), {
+    endpoint: "http://127.0.0.1:17841/v1/chatgpt-web-models",
+    headers: {},
+    allowPrivate: true,
+  });
+  assert.deepEqual(await providerCatalogRequest(PROVIDERS.get("local"), identity), {
+    endpoint: "http://127.0.0.1:17841/v1/models",
+    headers: { Authorization: "Bearer local" },
+    allowPrivate: true,
+  });
+});
+
+test("ChatGPT Web ignores a pre-change /models cache and reloads the dedicated catalog", async () => {
+  const baseUrl = "http://127.0.0.1:17841/v1";
+  const previousBaseUrl = process.env.MODEL_ROUTER_CHATGPT_WEB_BASE_URL;
+  process.env.MODEL_ROUTER_CHATGPT_WEB_BASE_URL = baseUrl;
+  try {
+    const identityFingerprint = providerDiscoveryIdentityFingerprint({
+      baseUrl,
+      credential: { value: "local" },
+    });
+    await writeProviderCatalogCache("chatgpt-web", {
+      discovered: ["gpt-6-astra", "chatgpt-web/high"],
+      fetchedAt: new Date().toISOString(),
+      identityFingerprint,
+      provenance: {
+        schema: "codex-router/provider-catalog/v1",
+        providerId: "chatgpt-web",
+        endpoint: `${baseUrl}/models`,
+        identityFingerprint,
+      },
+    });
+    const result = await discoverProviderModels("chatgpt-web", {
+      refresh: false,
+      cache: true,
+      loadPayload: async () => ({
+        data: [{ id: "chatgpt-web/high" }, { id: "chatgpt-web/pro" }],
+      }),
+    });
+    assert.equal(result.cached, false);
+    assert.deepEqual(result.discovered, ["chatgpt-web/high", "chatgpt-web/pro"]);
+  } finally {
+    if (previousBaseUrl === undefined) delete process.env.MODEL_ROUTER_CHATGPT_WEB_BASE_URL;
+    else process.env.MODEL_ROUTER_CHATGPT_WEB_BASE_URL = previousBaseUrl;
+  }
 });
 
 test("direct Responses requests retain Codex authority but strip account credentials", () => {

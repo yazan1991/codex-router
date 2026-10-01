@@ -36,6 +36,7 @@ import {
   fetchUntrustedModelCatalog,
   validateModelCatalogPayload,
 } from "./untrusted-model-discovery.mjs";
+import { discoverVertexProviderModels } from "./vertex-model-discovery.mjs";
 import {
   ensureFreshGitHubCopilotSession,
   githubCopilotCatalogHeaders,
@@ -206,6 +207,19 @@ function advertisedContextLength(item) {
   return smallest;
 }
 
+// Model id -> input modalities the provider itself stated for that model.
+// Present only where a record said so: curation must be able to tell a served
+// answer from the text-only default the merged view fills in.
+export function advertisedInputModalities(modelMetadata) {
+  const modalities = {};
+  for (const [id, metadata] of Object.entries(modelMetadata || {})) {
+    if (Array.isArray(metadata?.inputModalities) && metadata.inputModalities.length > 0) {
+      modalities[id] = [...metadata.inputModalities];
+    }
+  }
+  return modalities;
+}
+
 // Model id -> advertised context window, for the models `modelIds` kept. A
 // model the provider filtered out has no answer worth carrying, and a model
 // the provider sized in silence is absent rather than guessed: curation falls
@@ -243,9 +257,11 @@ function sameProviderDiscoveryIdentity(left, right) {
     === providerDiscoveryIdentityFingerprint(right);
 }
 
-function discoveryEndpoint(identity) {
+function discoveryEndpoint(provider, identity) {
   const baseUrl = identity?.baseUrl || identity?.session?.apiServerUrl;
-  return typeof baseUrl === "string" && baseUrl.trim() ? `${baseUrl.replace(/\/+$/, "")}/models` : undefined;
+  if (typeof baseUrl !== "string" || !baseUrl.trim()) return undefined;
+  const suffix = provider?.id === "chatgpt-web" ? "chatgpt-web-models" : "models";
+  return `${baseUrl.replace(/\/+$/, "")}/${suffix}`;
 }
 
 export function providerDiscoveryIdentityFingerprint(identity) {
@@ -275,6 +291,39 @@ function credentialChangedError(provider) {
   return error;
 }
 
+export async function providerCatalogRequest(provider, identity) {
+  const credential = identity?.credential || resolveProviderCredential(provider);
+  if (!credential) throw new Error(credentialStatus(provider).setup);
+  // The same loopback guard the api-forwarder applies: a keyless provider's
+  // placeholder credential passes the check above, so an unguarded override
+  // would send `Bearer local` to whatever host the environment names.
+  let baseUrl = identity?.baseUrl || resolveProviderBaseUrl(provider).baseUrl;
+  let headers = provider.id === "chatgpt-web" || provider.authMode === "anonymous"
+    ? {}
+    : provider.protocol === "anthropic"
+    ? { "x-api-key": credential.value, "anthropic-version": "2023-06-01" }
+    : { Authorization: `Bearer ${credential.value}` };
+  if (provider.authProfile === "github-copilot") {
+    const session = await ensureFreshGitHubCopilotSession(credential.value);
+    if (!process.env[provider.baseUrlEnv]) baseUrl = session.baseUrl;
+    headers = {
+      ...githubCopilotCatalogHeaders(session.token),
+    };
+  }
+  if (isOpenCodeProvider(provider)) {
+    headers["User-Agent"] = `codex-router/${VERSION}`;
+    applyOpenCodeSessionHeaders(headers, {
+      provider,
+      fallback: OPENCODE_SESSION_FALLBACKS.discovery,
+    });
+  }
+  return {
+    endpoint: discoveryEndpoint(provider, { baseUrl }),
+    headers,
+    allowPrivate: Boolean(provider.keyless),
+  };
+}
+
 async function providerPayload(provider, identity) {
   const fixture = option("--fixture");
   if (fixture) {
@@ -297,34 +346,10 @@ async function providerPayload(provider, identity) {
       })),
     };
   }
-  const credential = identity?.credential || resolveProviderCredential(provider);
-  if (!credential) throw new Error(credentialStatus(provider).setup);
-  // The same loopback guard the api-forwarder applies: a keyless provider's
-  // placeholder credential passes the check above, so an unguarded override
-  // would send `Bearer local` to whatever host the environment names.
-  let baseUrl = identity?.baseUrl || resolveProviderBaseUrl(provider).baseUrl;
-  let headers = provider.authMode === "anonymous"
-    ? {}
-    : provider.protocol === "anthropic"
-    ? { "x-api-key": credential.value, "anthropic-version": "2023-06-01" }
-    : { Authorization: `Bearer ${credential.value}` };
-  if (provider.authProfile === "github-copilot") {
-    const session = await ensureFreshGitHubCopilotSession(credential.value);
-    if (!process.env[provider.baseUrlEnv]) baseUrl = session.baseUrl;
-    headers = {
-      ...githubCopilotCatalogHeaders(session.token),
-    };
-  }
-  if (isOpenCodeProvider(provider)) {
-    headers["User-Agent"] = `codex-router/${VERSION}`;
-    applyOpenCodeSessionHeaders(headers, {
-      provider,
-      fallback: OPENCODE_SESSION_FALLBACKS.discovery,
-    });
-  }
-  return fetchUntrustedModelCatalog(`${baseUrl}/models`, {
-    headers,
-    allowPrivate: Boolean(provider.keyless),
+  const request = await providerCatalogRequest(provider, identity);
+  return fetchUntrustedModelCatalog(request.endpoint, {
+    headers: request.headers,
+    allowPrivate: request.allowPrivate,
   });
 }
 
@@ -338,10 +363,45 @@ async function providerPayload(provider, identity) {
  */
 export async function discoverProviderModels(
   providerId,
-  { refresh = false, cache = true, fixture = false, scope, loadPayload = providerPayload } = {},
+  {
+    refresh = false,
+    cache = true,
+    fixture = false,
+    fixturePayload,
+    fixturePath,
+    scope,
+    loadPayload = providerPayload,
+    fetchImpl,
+    timeoutMs,
+    allowPrivate,
+    resolveHost,
+    proxyResolvesDestination,
+    credential,
+    catalog,
+    staticCatalog = false,
+  } = {},
 ) {
   const provider = RUNTIME_PROVIDERS.get(providerId);
   if (!provider) throw new Error(`Unknown provider: ${providerId}`);
+  if (provider.protocol === "vertex") {
+    const cliFixture = option("--fixture");
+    return discoverVertexProviderModels(provider, {
+      refresh,
+      cache,
+      scope,
+      ...(fixture !== false && fixture !== undefined ? { fixture } : {}),
+      ...(fixturePayload !== undefined ? { fixturePayload } : {}),
+      ...(fixturePath || cliFixture ? { fixturePath: fixturePath || cliFixture } : {}),
+      ...(fetchImpl ? { fetchImpl } : {}),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(allowPrivate !== undefined ? { allowPrivate } : {}),
+      ...(resolveHost ? { resolveHost } : {}),
+      ...(proxyResolvesDestination !== undefined ? { proxyResolvesDestination } : {}),
+      ...(credential ? { credential } : {}),
+      ...(catalog ? { catalog } : {}),
+      ...(staticCatalog ? { staticCatalog: true } : {}),
+    });
+  }
   if (provider.generic === true) {
     const fixturePath = option("--fixture");
     const genericFixture = fixturePath
@@ -384,7 +444,11 @@ export async function discoverProviderModels(
       const currentIdentity = await providerDiscoveryIdentity(provider);
       const currentFingerprint = providerDiscoveryIdentityFingerprint(currentIdentity);
       const held = refresh ? undefined : catalog.read(providerId, { scope });
-      if (held?.identityFingerprint === currentFingerprint) {
+      const expectedEndpoint = discoveryEndpoint(provider, currentIdentity);
+      if (
+        held?.identityFingerprint === currentFingerprint &&
+        held?.provenance?.endpoint === expectedEndpoint
+      ) {
         return { cached: held, identity: currentIdentity };
       }
       if (held) catalog.forget([providerId], { scope });
@@ -436,7 +500,7 @@ export async function discoverProviderModels(
           provenance: {
             schema: "codex-router/provider-catalog/v1",
             providerId,
-            endpoint: discoveryEndpoint(identity),
+            endpoint: discoveryEndpoint(provider, identity),
             identityFingerprint: providerDiscoveryIdentityFingerprint(identity),
             ...(scope ? { scope } : {}),
           },
@@ -476,6 +540,7 @@ export async function discoverProviderModels(
     // Sizing the provider published for itself. Curation stores it rather than
     // guessing a window for a model whose catalog entry already names one.
     contextLengths,
+    inputModalities: advertisedInputModalities(modelMetadata),
     // Normalized provider-declared capabilities and documented supplements.
     // Missing fields stay missing: discovery is an evidence record, not a
     // reason to invent curation defaults or enable a route automatically.
@@ -538,6 +603,27 @@ export async function discoverGenericProviderModels(
     validateModelCatalogPayload(payload);
     discovered = modelIds(payload, descriptor);
     modelMetadata = metadataFromRecords(payload, descriptor);
+    // An OpenAI-compatible `/v1/models` list can say nothing about size or
+    // modalities (Ollama's does). When the same server describes its models
+    // individually, fill in exactly the fields the list left blank so
+    // curation stores the served window instead of its conservative guess.
+    if (!usingFixture && typeof snapshot.fetchModelDetails === "function") {
+      const details = await snapshot.fetchModelDetails({
+        ids: discovered,
+        fetchImpl,
+        timeoutMs,
+        resolveHost,
+        proxyResolvesDestination,
+      });
+      for (const [id, record] of Object.entries(details || {})) {
+        try {
+          const described = modelMetadataFromProviderRecord(record);
+          modelMetadata[id] = { ...described, ...(modelMetadata[id] || {}) };
+        } catch {
+          // One malformed description must not discard the catalog.
+        }
+      }
+    }
     fetchedAt = new Date().toISOString();
     if (storeAnswer) {
       if (genericProviderDiscoverySnapshot(providerId).identityFingerprint !== identityFingerprint) {
@@ -593,6 +679,7 @@ export async function discoverGenericProviderModels(
     blocked,
     unavailable: registered.filter((id) => !discoveredSet.has(id)),
     contextLengths,
+    inputModalities: advertisedInputModalities(modelMetadata),
     modelMetadata: merged,
     cached: Boolean(cached),
     stale: Boolean(cached?.stale),
