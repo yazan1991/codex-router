@@ -31,6 +31,7 @@ import {
 } from "./codex-binary.mjs";
 import { readUserModels } from "./user-models.mjs";
 import { syncRoutedCodexAgents } from "./codex-agent-catalog.mjs";
+import { syncCanonicalCodexRoles } from "./codex-role-matrix.mjs";
 import {
   MODEL_BY_SLUG,
   MODEL_SLUG_ALIASES,
@@ -1335,6 +1336,7 @@ export function publishCatalog({ refreshNative = refresh, output = true } = {}) 
       ? codexAgentDefinitionModels(routedModels, multiAgentSettings)
       : [];
     routedAgents = syncRoutedCodexAgents(eligibleAgents);
+    syncCanonicalCodexRoles();
     // Removing every definition is how an operator's subagents disappear, and
     // it is the only code path that does it. Say so on the way out: a publish
     // that read the routed catalog as inactive has just emptied a directory

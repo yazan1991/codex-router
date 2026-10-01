@@ -14,6 +14,7 @@ import {
   protectPrivateFile,
 } from "./file-security.mjs";
 import { subagentEffort } from "./multi-agent-state.mjs";
+import { canonicalRoutedEffort } from "./codex-role-matrix.mjs";
 import { CODEX_AGENTS_DIR } from "./paths.mjs";
 
 export function safeIdentifier(value, separator) {
@@ -136,7 +137,7 @@ export function syncRoutedCodexAgents(models, agentsDir = CODEX_AGENTS_DIR) {
   try {
     for (const model of models) {
       const definition = routedAgentDefinition(model, {
-        effort: subagentEffort(model.slug),
+        effort: subagentEffort(model.slug) || canonicalRoutedEffort(model.slug),
       });
       const target = path.join(agentsDir, definition.fileName);
       writeManagedAgent(target, definition.contents);
@@ -198,7 +199,9 @@ export function routedCodexAgentStatus(models, agentsDir = CODEX_AGENTS_DIR) {
     // `model_reasoning_effort` line, so every model with a configured subagent
     // effort read as permanently `stale`: doctor reported drift, `--fix`
     // republished the identical bytes, and the next check reported it again.
-    const definition = routedAgentDefinition(model, { effort: subagentEffort(model.slug) });
+    const definition = routedAgentDefinition(model, {
+      effort: subagentEffort(model.slug) || canonicalRoutedEffort(model.slug),
+    });
     const target = path.join(agentsDir, definition.fileName);
     expectedFiles.add(definition.fileName);
     if (!existsSync(target)) {
