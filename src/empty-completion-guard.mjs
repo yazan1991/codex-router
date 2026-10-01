@@ -21,7 +21,11 @@ const MAX_INCOMPLETE_EVENT_BYTES = 10 * 1024 * 1024;
 // usual four bytes per token; the allowance only ever grows, and never past
 // `maxMs` (unless the configured base is already larger, which is the
 // operator's explicit choice).
-export const PRELUDE_MS_PER_THOUSAND_TOKENS = 150;
+// Linux production evidence on 2026-10-01 showed that 150 ms / 1k estimated
+// tokens still cut off valid GPT-6.1 Sol turns around the 50-60s window at
+// ~180k-token session sizes. Keep the 30s base and 10-minute hard ceiling, but
+// double only the size-dependent allowance to absorb observed prefill variance.
+export const PRELUDE_MS_PER_THOUSAND_TOKENS = 300;
 export const PRELUDE_BUDGET_MAX_MS = 600_000;
 
 export function preludeBudgetMs({
