@@ -9,7 +9,7 @@ Codex Automatic Approval Review / Guardian can select a native OpenAI reviewer i
 The maintained Router supports `autoReviewModelOverride` in model registry data and publishes it as `auto_review_model_override` in the generated Codex catalog. GPT 6.1 Sol through CLIProxy declares:
 
 ```json
-"autoReviewModelOverride": "cliproxy/gpt-6.1-sol"
+"autoReviewModelOverride": "cliproxy/codex-auto-review"
 ```
 
 This keeps Guardian inference on CLIProxy Sol 6.1 for that routed parent model. It does not bypass approval policy, sandbox policy, OpenAI authentication, or native OpenAI quota enforcement.
