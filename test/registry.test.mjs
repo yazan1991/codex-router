@@ -57,6 +57,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "clinepass/qwen3.7-max",
       "clinepass/qwen3.7-plus",
       "clinepass/qwen3.8-max",
+      "cliproxy/claude-fable-5-1",
       "cliproxy/claude-opus-5-5",
       "cliproxy/claude-sonnet-5-5",
       "cliproxy/deepseek-v4.1-flash",
