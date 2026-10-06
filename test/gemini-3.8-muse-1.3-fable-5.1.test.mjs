@@ -47,6 +47,7 @@ const FABLE_51_ROUTES = [
   ["commandcode-messages/claude-fable-5.1", "claude-fable-5-1", 1_000_000, 900_000],
   ["nousresearch/claude-fable-5.1", "anthropic/claude-fable-5.1", 1_048_576, 943_000],
   ["venice/claude-fable-5.1", "claude-fable-5-1", 1_000_000, 900_000],
+  ["cliproxy/claude-fable-5-1", "claude-fable-5-1", 1_000_000, 900_000],
 ];
 
 // Additional confirmed routes 2026-09-03.
@@ -276,6 +277,7 @@ test("Claude Fable 5.1 reasoning ladders match provider patterns", () => {
     "openrouter/claude-fable-5.1",
     "commandcode-messages/claude-fable-5.1",
     "nousresearch/claude-fable-5.1",
+    "cliproxy/claude-fable-5-1",
   ];
   const expectedEfforts = ["low", "medium", "high", "xhigh", "max"];
   for (const slug of fullLadderSlugs) {
@@ -292,6 +294,13 @@ test("Claude Fable 5.1 reasoning ladders match provider patterns", () => {
     veniceModel.reasoningLevels.map((level) => level.effort),
     ["low", "high", "max"],
   );
+});
+
+test("CLIProxy Claude Fable 5.1 publishes the documented default and modalities", () => {
+  const model = MODEL_BY_SLUG.get("cliproxy/claude-fable-5-1");
+  assert.equal(model.defaultEffort, "high");
+  assert.deepEqual(model.inputModalities, ["text", "image"]);
+  assert.equal(model.multiAgentVersion, "v1");
 });
 
 test("GLM-5.3-Flash uses low/high/max reasoning ladder", () => {
