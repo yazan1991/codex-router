@@ -739,6 +739,9 @@ export function routedModel(template, model, behaviorTemplate = template) {
         ? model.autoReviewModelOverride.trim()
         : null,
   };
+  if (model.includeSkillsUsageInstructions !== undefined) {
+    next.include_skills_usage_instructions = model.includeSkillsUsageInstructions;
+  }
 
   // BEGIN local-cliproxy-gpt56-native-capability-parity
   //

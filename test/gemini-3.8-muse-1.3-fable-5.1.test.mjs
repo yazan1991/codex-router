@@ -302,6 +302,7 @@ test("CLIProxy Claude Fable 5.1 publishes the documented default and modalities"
   assert.deepEqual(model.inputModalities, ["text", "image"]);
   assert.equal(model.bridgeApplyPatchTool, true);
   assert.equal(model.supportsApplyPatchTool, undefined);
+  assert.equal(model.includeSkillsUsageInstructions, false);
   assert.equal(model.multiAgentVersion, "v1");
 });
 

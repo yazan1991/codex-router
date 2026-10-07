@@ -421,6 +421,20 @@ test("routed models can explicitly narrow inherited tool capabilities", () => {
   assert.deepEqual(narrowed.experimental_supported_tools, []);
 });
 
+test("routed models can suppress inherited skill usage instructions", () => {
+  const plain = routedModel(template, grok);
+  assert.equal(
+    plain.include_skills_usage_instructions,
+    template.include_skills_usage_instructions,
+  );
+
+  const reduced = routedModel(template, {
+    ...grok,
+    includeSkillsUsageInstructions: false,
+  });
+  assert.equal(reduced.include_skills_usage_instructions, false);
+});
+
 test("routed service tiers are explicit and never inherit a paid default", () => {
   const plain = routedModel(template, grok);
   assert.deepEqual(plain.service_tiers, []);

@@ -742,6 +742,12 @@ function modelProblem(model, providers, slugs, gatewayModels) {
     return `model ${model.slug} has an invalid bridgeApplyPatchTool`;
   }
   if (
+    model.includeSkillsUsageInstructions !== undefined &&
+    typeof model.includeSkillsUsageInstructions !== "boolean"
+  ) {
+    return `model ${model.slug} has an invalid includeSkillsUsageInstructions`;
+  }
+  if (
     model.supportsParallelToolCalls !== undefined &&
     typeof model.supportsParallelToolCalls !== "boolean"
   ) {

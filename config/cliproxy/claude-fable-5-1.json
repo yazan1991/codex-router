@@ -22,6 +22,7 @@
       "autoCompact": 900000,
       "inputModalities": ["text", "image"],
       "bridgeApplyPatchTool": true,
+      "includeSkillsUsageInstructions": false,
       "multiAgentVersion": "v1",
       "compHash": "cliproxy-claude-fable-5-1-v1"
     }
