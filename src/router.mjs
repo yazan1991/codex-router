@@ -178,6 +178,8 @@ import {
 } from "./namespace-relay.mjs";
 import {
   chatProviderToolSurface,
+  ensureClientToolSearchForCodexAppConnectors,
+  pruneCodexAppConnectorTools,
   GROQ_MAX_TOOLS,
   GroqToolLimitError,
   GROQ_TOOL_LIMIT_CODE,
@@ -3686,9 +3688,15 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // Restore declarations only where the existing adapter flattens tools again.
   // Native Responses routes retain the client's original declaration shape and
   // restore only their response lookup below.
-  const clientTools = chatCompletionsProvider || deepSeekResponses || consoleGoResponsesCompatibility
+  let clientTools = chatCompletionsProvider || deepSeekResponses || consoleGoResponsesCompatibility
     ? restorePreflattenedToolNamespaces(payload.tools, payload.client_metadata)
     : payload.tools;
+  if (
+    provider?.id === "cliproxy-messages" &&
+    route.slug.startsWith("cliproxy/claude-")
+  ) {
+    clientTools = ensureClientToolSearchForCodexAppConnectors(clientTools).tools;
+  }
   const compatibleInput = consoleGoCompatibleInput(
     zenFreeCompatibleInput(
       normalizeProviderAppToolOutputs(agedInput),
@@ -3829,6 +3837,12 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     // strict Responses providers may reject. Run the shared root repair on the
     // tools alone without flattening their native representation.
     tools = repairToolSchemaRoots(tools);
+  }
+  if (
+    provider?.id === "cliproxy-messages" &&
+    route.slug.startsWith("cliproxy/claude-")
+  ) {
+    tools = pruneCodexAppConnectorTools(tools).tools;
   }
   if (needsNonRecursiveToolSchemaCompatibility(route)) {
     // Run after namespace flattening so both native children and ordinary

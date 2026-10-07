@@ -633,8 +633,9 @@ function modelProblem(model, providers, slugs, gatewayModels) {
   if (!provider) {
     return `model ${model.slug} references unknown provider ${model.provider}`;
   }
-  if (!model.slug.startsWith(`${model.provider}/`)) {
-    return `model ${model.slug} must be namespaced under ${model.provider}/`;
+  const providerNamespaces = [model.provider, provider.variantOf].filter(Boolean);
+  if (!providerNamespaces.some((namespace) => model.slug.startsWith(`${namespace}/`))) {
+    return `model ${model.slug} must be namespaced under ${providerNamespaces.join("/ or ")}/`;
   }
   if (model.adapter !== undefined && typeof model.adapter !== "string") {
     return "model " + model.slug + " has an invalid adapter";
@@ -773,6 +774,12 @@ function modelProblem(model, providers, slugs, gatewayModels) {
     typeof model.supportsImageDetailOriginal !== "boolean"
   ) {
     return `model ${model.slug} has an invalid supportsImageDetailOriginal`;
+  }
+  if (
+    model.supportsToolSearch !== undefined &&
+    typeof model.supportsToolSearch !== "boolean"
+  ) {
+    return `model ${model.slug} has an invalid supportsToolSearch`;
   }
   // The router's vision bridge covers every text-only model once the operator
   // enables it, so this field exists only to opt one out -- a model whose

@@ -403,6 +403,26 @@ test("a tool-call turn is not empty and its terminal events survive", async () =
   assert.match(body, /response\.completed/);
 });
 
+test("a client tool-search call is not an empty completion", async () => {
+  const input = [
+    "event: response.output_item.added",
+    `data: ${JSON.stringify({
+      type: "response.output_item.added",
+      item: { type: "tool_search_call", call_id: "search_1", execution: "client", arguments: { query: "github issues" } },
+    })}`,
+    "",
+    "event: response.completed",
+    `data: ${JSON.stringify({
+      type: "response.completed",
+      response: { output: [{ type: "tool_search_call", call_id: "search_1", execution: "client", arguments: { query: "github issues" } }] },
+    })}`,
+    "",
+  ].join("\n");
+  const { body, empty } = await runGuard(input);
+  assert.equal(empty, false);
+  assert.equal(body, input);
+});
+
 test("custom tool input events count as content", async () => {
   const input = [
     "event: response.custom_tool_call_input.delta",

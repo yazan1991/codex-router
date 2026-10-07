@@ -47,7 +47,7 @@ const FABLE_51_ROUTES = [
   ["commandcode-messages/claude-fable-5.1", "claude-fable-5-1", 1_000_000, 900_000],
   ["nousresearch/claude-fable-5.1", "anthropic/claude-fable-5.1", 1_048_576, 943_000],
   ["venice/claude-fable-5.1", "claude-fable-5-1", 1_000_000, 900_000],
-  ["cliproxy/claude-fable-5-1", "claude-fable-5-1", 1_000_000, 900_000],
+  ["cliproxy/claude-fable-5-1", "claude-fable-5-1", 1_000_000, 260_000],
 ];
 
 // Additional confirmed routes 2026-09-03.
@@ -303,6 +303,20 @@ test("CLIProxy Claude Fable 5.1 publishes the documented default and modalities"
   assert.equal(model.bridgeApplyPatchTool, true);
   assert.equal(model.supportsApplyPatchTool, undefined);
   assert.equal(model.includeSkillsUsageInstructions, false);
+  assert.equal(model.supportsToolSearch, true);
+  const picker = routedModel(
+    {
+      slug: "gpt-template",
+      display_name: "Template",
+      description: "Template",
+      priority: 10,
+      visibility: "list",
+      apply_patch_tool_type: "freeform",
+    },
+    model,
+  );
+  assert.equal(picker.supports_search_tool, true);
+  assert.equal(picker.use_responses_lite, false);
   assert.equal(model.multiAgentVersion, "v1");
 });
 

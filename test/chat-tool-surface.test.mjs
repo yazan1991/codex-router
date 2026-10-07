@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   chatProviderToolSurface,
+  ensureClientToolSearchForCodexAppConnectors,
+  pruneCodexAppConnectorTools,
   GROQ_MAX_TOOLS,
   GROQ_TOOL_LIMIT_CODE,
 } from "../src/chat-tool-surface.mjs";
@@ -54,6 +56,71 @@ function largeClientSurface({
     },
   ];
 }
+
+test("CLIProxy Claude bridges Codex app connectors through client tool search", () => {
+  const original = [
+    { type: "tool_search_tool_regex_20251119", name: "tool_search_tool_regex" },
+    { type: "function", name: "direct", parameters: { type: "object" } },
+    {
+      type: "namespace",
+      name: "mcp__codex_apps__github",
+      tools: [
+        {
+          type: "function",
+          name: "list_issues",
+          inputSchema: { type: "object", properties: { repo: { type: "string" } } },
+        },
+      ],
+    },
+  ];
+
+  const prepared = ensureClientToolSearchForCodexAppConnectors(original);
+  assert.equal(prepared.changed, true);
+  assert.equal(prepared.synthesized, true);
+  assert.equal(prepared.tools[0].type, "tool_search");
+  assert.equal(prepared.tools[0].execution, "client");
+  assert.equal(
+    prepared.tools.some((tool) => tool.type === "tool_search_tool_regex_20251119"),
+    false,
+  );
+  assert.equal(
+    prepared.tools.some((tool) => tool.name === "mcp__codex_apps__github"),
+    true,
+  );
+
+  const flattened = chatProviderToolSurface(prepared.tools, "cliproxy-messages");
+  assert.equal(toolSearchRelayAvailable(flattened.namespaces), true);
+  assert.equal(flattened.tools.some((tool) => tool.name === "tool_search"), true);
+  assert.equal(
+    flattened.tools.some((tool) => tool.name === "mcp__codex_apps__github__list_issues"),
+    true,
+  );
+
+  const pruned = pruneCodexAppConnectorTools(flattened.tools);
+  assert.equal(pruned.removed, 1);
+  assert.equal(pruned.tools.some((tool) => tool.name === "tool_search"), true);
+  assert.equal(
+    pruned.tools.some((tool) => tool.name.startsWith("mcp__codex_apps__")),
+    false,
+  );
+});
+
+test("CLIProxy Claude reuses an existing client tool-search control", () => {
+  const search = clientToolSearch();
+  const original = [
+    search,
+    {
+      type: "namespace",
+      name: "mcp__codex_apps__drive",
+      tools: [{ type: "function", name: "read", inputSchema: { type: "object" } }],
+    },
+    { type: "function", name: "shell", parameters: { type: "object" } },
+  ];
+  const prepared = ensureClientToolSearchForCodexAppConnectors(original);
+  assert.equal(prepared.synthesized, false);
+  assert.equal(prepared.tools.filter((tool) => tool.type === "tool_search").length, 1);
+  assert.equal(prepared.tools[0], search);
+});
 
 test("Groq defers only injected app definitions without requiring tool_search", () => {
   const client = largeClientSurface();

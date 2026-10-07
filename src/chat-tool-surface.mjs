@@ -202,6 +202,72 @@ function withRequiredAppTools(tools, required) {
   return selected;
 }
 
+const NATIVE_ANTHROPIC_TOOL_SEARCH_TYPES = new Set([
+  "tool_search_tool_regex_20251119",
+  "tool_search_tool_bm25_20251119",
+]);
+const CODEX_APP_CONNECTOR_PREFIX = "mcp__codex_apps__";
+
+const SYNTHETIC_CLIENT_TOOL_SEARCH = Object.freeze({
+  type: "tool_search",
+  execution: "client",
+  description: "Search deferred tools.",
+  parameters: {
+    type: "object",
+    properties: { query: { type: "string" } },
+    required: ["query"],
+    additionalProperties: false,
+  },
+});
+
+// Codex Desktop carries connector inventories as namespace entries. Their
+// children are not marked defer_loading until the later Anthropic translation,
+// so a provider-side defer_loading filter is too late for relays that reject the
+// raw request size first. When connector namespaces are present, replace the
+// native Anthropic search control with Codex's client-executed tool_search
+// control before namespace flattening. The namespace inventory itself remains
+// intact here so response restoration and tool-search discovery retain the full
+// identity map.
+export function ensureClientToolSearchForCodexAppConnectors(tools) {
+  if (!Array.isArray(tools)) return { tools, changed: false, synthesized: false };
+  const hasConnectors = tools.some(
+    (tool) =>
+      tool?.type === "namespace" &&
+      typeof tool.name === "string" &&
+      tool.name.startsWith(CODEX_APP_CONNECTOR_PREFIX),
+  );
+  if (!hasConnectors) return { tools, changed: false, synthesized: false };
+
+  const hasClientSearch = tools.some(
+    (tool) => tool?.type === "tool_search" && tool.execution === "client",
+  );
+  const next = tools.filter((tool) => !NATIVE_ANTHROPIC_TOOL_SEARCH_TYPES.has(tool?.type));
+  if (!hasClientSearch) next.unshift(SYNTHETIC_CLIENT_TOOL_SEARCH);
+  return {
+    tools: next,
+    changed: next.length !== tools.length || !hasClientSearch,
+    synthesized: !hasClientSearch,
+  };
+}
+
+// Run after namespace flattening and before flattenToolSearchHistory. Connector
+// definitions are omitted from the first provider request, while the request-
+// local namespace map and tool_search relay remain alive. A later
+// tool_search_output is processed after this filter and re-adds only the tools
+// the client actually discovered.
+export function pruneCodexAppConnectorTools(tools) {
+  if (!Array.isArray(tools)) return { tools, removed: 0 };
+  const next = tools.filter(
+    (tool) =>
+      !(
+        tool?.type === "function" &&
+        typeof tool.name === "string" &&
+        tool.name.startsWith(CODEX_APP_CONNECTOR_PREFIX)
+      ),
+  );
+  return { tools: next, removed: tools.length - next.length };
+}
+
 // Chat-completions providers need namespace flattening. When the client also
 // supplies its client-executed tool_search control, however, its reduced
 // codex_app namespace is deliberate deferred loading: keep that reduced surface

@@ -5,7 +5,7 @@
       "slug": "cliproxy/claude-fable-5-1",
       "gatewayModel": "cliproxy-claude-fable-5-1",
       "upstreamModel": "claude-fable-5-1",
-      "provider": "cliproxy",
+      "provider": "cliproxy-messages",
       "listed": true,
       "displayName": "Claude Fable 5.1 (CLIProxy)",
       "description": "Claude Fable 5.1 through the checked-in CLIProxy route.",
@@ -19,12 +19,13 @@
         { "effort": "max", "description": "Maximum reasoning depth" }
       ],
       "contextWindow": 1000000,
-      "autoCompact": 900000,
+      "autoCompact": 260000,
       "inputModalities": ["text", "image"],
       "bridgeApplyPatchTool": true,
       "includeSkillsUsageInstructions": false,
+      "supportsToolSearch": true,
       "multiAgentVersion": "v1",
-      "compHash": "cliproxy-claude-fable-5-1-v1"
+      "compHash": "cliproxy-claude-fable-5-1-v2"
     }
   ]
 }

@@ -715,7 +715,8 @@ export function routedModel(template, model, behaviorTemplate = template) {
     // executed by the provider backend; standalone search is executed by
     // Codex and its result is replayed through the routed conversation. An
     // absent declaration remains the conservative default.
-    supports_search_tool: routedModelSearchAvailable(model),
+    supports_search_tool:
+      model.supportsToolSearch === true || routedModelSearchAvailable(model),
     supports_image_detail_original: model.supportsImageDetailOriginal === true,
     // A routed model must never inherit a native template's capability. Codex
     // now requires the key, and `false` is both schema-valid and conservative

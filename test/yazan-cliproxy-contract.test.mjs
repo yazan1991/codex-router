@@ -59,6 +59,26 @@ test("CLIProxy native GPT parity remains narrowly scoped", () => {
   );
 });
 
+test("CLIProxy Claude routes compact early and omit skill usage instructions", () => {
+  for (const [fileName, slug, compHash] of [
+    ["claude-fable-5-1.json", "cliproxy/claude-fable-5-1", "cliproxy-claude-fable-5-1-v2"],
+    ["claude-opus-5-5.json", "cliproxy/claude-opus-5-5", "cliproxy-claude-opus-5-5-v2"],
+    ["claude-sonnet-5-5.json", "cliproxy/claude-sonnet-5-5", "cliproxy-claude-sonnet-5-5-v2"],
+  ]) {
+    const payload = JSON.parse(
+      fs.readFileSync(new URL(`../config/cliproxy/${fileName}`, import.meta.url), "utf8"),
+    );
+    const model = payload.models.find((entry) => entry.slug === slug);
+    assert.ok(model, `missing CLIProxy Claude route: ${slug}`);
+    assert.equal(model.provider, "cliproxy-messages");
+    assert.equal(model.contextWindow, 1_000_000);
+    assert.equal(model.autoCompact, 260_000);
+    assert.equal(model.includeSkillsUsageInstructions, false);
+    assert.equal(model.supportsToolSearch, true);
+    assert.equal(model.compHash, compHash);
+  }
+});
+
 test("CLIProxy strips only ChatGPT private message metadata at compatibility boundary", () => {
   const helperMatch = forwarder.match(
     /function stripInternalChatMessageMetadataPassthrough\(payload\) \{[\s\S]*?\n\}/,
