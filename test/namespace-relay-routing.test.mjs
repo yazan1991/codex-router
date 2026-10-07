@@ -2910,6 +2910,103 @@ test("routed native apply_patch relays LiteLLM arguments that are not a leading 
   }
 });
 
+test("CLIProxy Fable 5.1 bridges native apply_patch through LiteLLM and restores it for Codex", async () => {
+  const patch = "*** Begin Patch\n*** Update File: src/a.js\n@@\n-const a = 1;\n+const a = 2;\n*** End Patch";
+  const argumentsText = JSON.stringify({ input: patch });
+  const callId = "call_fable_patch";
+  const itemId = "fc_fable_patch";
+  const sseBody = () => [
+    sseEvent({ type: "response.created", response: { id: "resp_fable_patch" } }),
+    sseEvent({
+      type: "response.output_item.added",
+      output_index: 0,
+      item: {
+        type: "function_call",
+        id: itemId,
+        call_id: callId,
+        name: "apply_patch",
+        arguments: "",
+        status: "in_progress",
+      },
+    }),
+    sseEvent({
+      type: "response.function_call_arguments.delta",
+      output_index: 0,
+      item_id: itemId,
+      call_id: callId,
+      delta: argumentsText,
+    }),
+    sseEvent({
+      type: "response.function_call_arguments.done",
+      output_index: 0,
+      item_id: itemId,
+      call_id: callId,
+      arguments: argumentsText,
+    }),
+    sseEvent({
+      type: "response.output_item.done",
+      output_index: 0,
+      item: {
+        type: "function_call",
+        id: itemId,
+        call_id: callId,
+        name: "apply_patch",
+        arguments: argumentsText,
+        status: "completed",
+      },
+    }),
+    sseEvent({ type: "response.completed", response: { id: "resp_fable_patch", output: [] } }),
+    "data: [DONE]\n\n",
+  ].join("");
+
+  const result = await scenario(true, {
+    model: "cliproxy/claude-fable-5-1",
+    requestPayload: (stream, model) => ({
+      model,
+      stream,
+      input: "Apply the patch.",
+      tools: [{
+        type: "custom",
+        name: "apply_patch",
+        description: "Apply a patch.",
+        format: { type: "grammar", syntax: "lark", definition: "start: /[\\s\\S]+/" },
+      }],
+    }),
+    sseBody,
+  });
+
+  const providerPatch = result.gatewayBodies[0].tools.find((tool) => tool.name === "apply_patch");
+  assert.equal(providerPatch?.type, "function");
+  assert.deepEqual(providerPatch?.parameters, {
+    type: "object",
+    properties: {
+      input: {
+        type: "string",
+        description: "The complete raw freeform input for this tool, preserved verbatim.",
+      },
+    },
+    required: ["input"],
+    additionalProperties: false,
+  });
+  assert.equal(
+    result.gatewayBodies[0].tools.some((tool) => tool.type === "custom" && tool.name === "apply_patch"),
+    false,
+  );
+
+  const events = result.clientBody.split(/\r?\n/)
+    .filter((line) => line.startsWith("data: {"))
+    .map((line) => JSON.parse(line.slice(6)));
+  const inputDone = events.find((event) =>
+    event.type === "response.custom_tool_call_input.done" && event.call_id === callId);
+  assert.equal(inputDone?.input, patch);
+  const closed = events.find((event) =>
+    event.type === "response.output_item.done" && event.item?.call_id === callId);
+  assert.equal(closed?.item?.type, "custom_tool_call");
+  assert.equal(closed?.item?.name, "apply_patch");
+  assert.equal(closed?.item?.input, patch);
+  assert.ok(events.some((event) => event.type === "response.completed"));
+});
+
 test("a routed turn whose tool calls leaked into the reasoning channel still runs them", async () => {
   // Captured from rollout 01a0924e (opencode-go hy4-preview, 12 September 2026):
   // the model wrote its calls as text on the reasoning channel, nothing reached

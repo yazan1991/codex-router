@@ -3681,6 +3681,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   const provider = providerForModel(route);
   const chatCompletionsProvider = provider?.protocol !== "openai-responses";
   const deepSeekResponses = usesDeepSeekResponses(route);
+  const bridgeApplyPatchTool = route.bridgeApplyPatchTool === true;
   const consoleGoResponsesCompatibility = needsConsoleGoResponsesToolCompatibility(route);
   // Restore declarations only where the existing adapter flattens tools again.
   // Native Responses routes retain the client's original declaration shape and
@@ -3851,7 +3852,13 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     Array.isArray(tools) && tools.some(
       (tool) => tool?.type === "custom" && tool.name === "apply_patch",
     );
-  if (needsStrictOpenCodeToolCompatibility(route) || deepSeekResponses || structuredPatch || patchHook) {
+  if (
+    needsStrictOpenCodeToolCompatibility(route) ||
+    deepSeekResponses ||
+    structuredPatch ||
+    patchHook ||
+    bridgeApplyPatchTool
+  ) {
     const customTools = bridgeCustomTools(
       tools,
       routedInput,
