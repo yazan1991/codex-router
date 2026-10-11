@@ -62,14 +62,14 @@ export function routedAgentDefinition(model, { effort } = {}) {
   const displayName = String(model.displayName || model.display_name || slug).trim();
   const reasoningEffort =
     typeof effort === "string" && effort.trim() ? effort.trim() : undefined;
-  const astraAdvisor = slug === "cliproxy/gpt-6-astra";
+  const astraAdvisor = slug === "my-router-codex/gpt-6-astra";
   const description = astraAdvisor
-    ? "GPT 6 Astra (CLIProxy) escalation-only expert advisor for exceptionally difficult, high-impact, disputed, or final-review tasks. Do not use for routine work."
-    : `${displayName} agent routed through an authenticated Codex Router provider.`;
+    ? "GPT 6 Astra escalation-only expert consultant and final reviewer for exceptionally difficult, high-impact, ambiguous, disputed, or repeatedly failing tasks. Do not use for routine work."
+    : `${displayName} agent routed through the active OpenCodex provider.`;
   const instructions = astraAdvisor
     ? [
         "Act as an escalation-only expert consultant and independent final reviewer.",
-        "Use this role only for exceptionally difficult, high-impact, ambiguous, disputed, or repeatedly failing tasks where Luna or Sol 6.1 needs a second opinion.",
+        "Use this role only for exceptionally difficult, high-impact, ambiguous, disputed, or repeatedly failing tasks, or when the parent explicitly requests an expert consultation or final adjudication.",
         "Stay read-only. Do not implement routine work, do not become the default worker, and do not take over tasks that Luna or Sol 6.1 can handle.",
         "Challenge assumptions, identify hidden failure modes, compare viable approaches, and return a concrete recommendation with evidence and unresolved risks.",
         "For inspection or review claims, cite the exact file and line. Before claiming that something is absent, search the relevant names and paths; before finishing, reopen every cited location and drop any claim that does not hold.",
@@ -84,10 +84,9 @@ export function routedAgentDefinition(model, { effort } = {}) {
         "Return a concise summary of work completed, checks run, and remaining risks.",
       ];
   const contents = [
-    "# Managed by Codex Router. Refresh the model catalog to update this file.",
+    "# Managed by Codex++ for the active OpenCodex model catalog. Refresh the model catalog to update this file.",
     `name = ${tomlString(agentName)}`,
     `description = ${tomlString(description)}`,
-    'model_provider = "codex-router"',
     `model = ${tomlString(slug)}`,
     ...(reasoningEffort ? [`model_reasoning_effort = ${tomlString(reasoningEffort)}`] : []),
     ...(astraAdvisor ? ['sandbox_mode = "read-only"'] : []),

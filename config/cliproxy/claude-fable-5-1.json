@@ -23,7 +23,7 @@
       "inputModalities": ["text", "image"],
       "bridgeApplyPatchTool": true,
       "includeSkillsUsageInstructions": false,
-      "supportsToolSearch": true,
+      "searchTool": { "mode": "standalone" },
       "multiAgentVersion": "v1",
       "compHash": "cliproxy-claude-fable-5-1-v2"
     }

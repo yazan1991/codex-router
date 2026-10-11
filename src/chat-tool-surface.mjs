@@ -206,7 +206,7 @@ const NATIVE_ANTHROPIC_TOOL_SEARCH_TYPES = new Set([
   "tool_search_tool_regex_20251119",
   "tool_search_tool_bm25_20251119",
 ]);
-const CODEX_APP_CONNECTOR_PREFIX = "mcp__codex_apps__";
+const MCP_NAMESPACE_PREFIX = "mcp__";
 
 const SYNTHETIC_CLIENT_TOOL_SEARCH = Object.freeze({
   type: "tool_search",
@@ -220,23 +220,15 @@ const SYNTHETIC_CLIENT_TOOL_SEARCH = Object.freeze({
   },
 });
 
-// Codex Desktop carries connector inventories as namespace entries. Their
-// children are not marked defer_loading until the later Anthropic translation,
-// so a provider-side defer_loading filter is too late for relays that reject the
-// raw request size first. When connector namespaces are present, replace the
-// native Anthropic search control with Codex's client-executed tool_search
-// control before namespace flattening. The namespace inventory itself remains
-// intact here so response restoration and tool-search discovery retain the full
-// identity map.
-export function ensureClientToolSearchForCodexAppConnectors(tools) {
+export function ensureClientToolSearchForMcpNamespaces(tools) {
   if (!Array.isArray(tools)) return { tools, changed: false, synthesized: false };
-  const hasConnectors = tools.some(
+  const hasMcpNamespaces = tools.some(
     (tool) =>
       tool?.type === "namespace" &&
       typeof tool.name === "string" &&
-      tool.name.startsWith(CODEX_APP_CONNECTOR_PREFIX),
+      tool.name.startsWith(MCP_NAMESPACE_PREFIX),
   );
-  if (!hasConnectors) return { tools, changed: false, synthesized: false };
+  if (!hasMcpNamespaces) return { tools, changed: false, synthesized: false };
 
   const hasClientSearch = tools.some(
     (tool) => tool?.type === "tool_search" && tool.execution === "client",
@@ -250,19 +242,14 @@ export function ensureClientToolSearchForCodexAppConnectors(tools) {
   };
 }
 
-// Run after namespace flattening and before flattenToolSearchHistory. Connector
-// definitions are omitted from the first provider request, while the request-
-// local namespace map and tool_search relay remain alive. A later
-// tool_search_output is processed after this filter and re-adds only the tools
-// the client actually discovered.
-export function pruneCodexAppConnectorTools(tools) {
+export function pruneMcpNamespaceTools(tools) {
   if (!Array.isArray(tools)) return { tools, removed: 0 };
   const next = tools.filter(
     (tool) =>
       !(
         tool?.type === "function" &&
         typeof tool.name === "string" &&
-        tool.name.startsWith(CODEX_APP_CONNECTOR_PREFIX)
+        tool.name.startsWith(MCP_NAMESPACE_PREFIX)
       ),
   );
   return { tools: next, removed: tools.length - next.length };

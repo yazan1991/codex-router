@@ -19,7 +19,7 @@ export const CANONICAL_NAMED_ROLES = Object.freeze([
     fileName: "luna-search.toml",
     name: "luna_search",
     description: "Luna fast exact lookup worker for paths, symbols, strings, small inventories, and narrow logs.",
-    model: "cliproxy/gpt-6-luna",
+    model: "my-router-codex/gpt-6-luna",
     reasoningEffort: "low",
     sandboxMode: "read-only",
     instructions: [
@@ -33,7 +33,7 @@ export const CANONICAL_NAMED_ROLES = Object.freeze([
     fileName: "fast-scan.toml",
     name: "fast_scan",
     description: "Luna repository mapper for cross-file ownership, dependency tracing, and bounded evidence.",
-    model: "cliproxy/gpt-6-luna",
+    model: "my-router-codex/gpt-6-luna",
     reasoningEffort: "medium",
     sandboxMode: "read-only",
     instructions: [
@@ -47,7 +47,7 @@ export const CANONICAL_NAMED_ROLES = Object.freeze([
     fileName: "docs-researcher.toml",
     name: "docs_researcher",
     description: "Luna official-documentation and compatibility researcher for evidence synthesis.",
-    model: "cliproxy/gpt-6-luna",
+    model: "my-router-codex/gpt-6-luna",
     reasoningEffort: "high",
     sandboxMode: "read-only",
     instructions: [
@@ -61,7 +61,7 @@ export const CANONICAL_NAMED_ROLES = Object.freeze([
     fileName: "test-runner.toml",
     name: "test_runner",
     description: "Luna reproduction and focused deterministic verification worker.",
-    model: "cliproxy/gpt-6-luna",
+    model: "my-router-codex/gpt-6-luna",
     reasoningEffort: "medium",
     sandboxMode: "workspace-write",
     instructions: [
@@ -75,7 +75,7 @@ export const CANONICAL_NAMED_ROLES = Object.freeze([
     fileName: "routine-worker.toml",
     name: "routine_worker",
     description: "Sol 6.1 implementation worker for bounded contextual execution and difficult coding work.",
-    model: "cliproxy/gpt-6.1-sol",
+    model: "my-router-codex/gpt-6.1-sol",
     reasoningEffort: "high",
     sandboxMode: "workspace-write",
     instructions: [
@@ -89,7 +89,7 @@ export const CANONICAL_NAMED_ROLES = Object.freeze([
     fileName: "reviewer.toml",
     name: "reviewer",
     description: "Sol 6.1 independent read-only correctness, regression, and difficult-work reviewer.",
-    model: "cliproxy/gpt-6.1-sol",
+    model: "my-router-codex/gpt-6.1-sol",
     reasoningEffort: "xhigh",
     sandboxMode: "read-only",
     instructions: [
@@ -102,9 +102,9 @@ export const CANONICAL_NAMED_ROLES = Object.freeze([
 ]);
 
 export const CANONICAL_ROUTED_EFFORTS = Object.freeze({
-  "cliproxy/gpt-6-luna": "max",
-  "cliproxy/gpt-6.1-sol": "high",
-  "cliproxy/gpt-6-astra": "max",
+  "my-router-codex/gpt-6-luna": "max",
+  "my-router-codex/gpt-6.1-sol": "high",
+  "my-router-codex/gpt-6-astra": "max",
 });
 
 export function canonicalRoutedEffort(slug) {
@@ -117,10 +117,9 @@ function tomlString(value) {
 
 export function canonicalRoleContents(role) {
   return [
-    "# Managed by Codex Router canonical role matrix. Edit the source matrix, not this file.",
+    "# Managed by the Codex++ canonical role matrix for OpenCodex-routed agents. Edit the source matrix, not this file.",
     `name = ${tomlString(role.name)}`,
     `description = ${tomlString(role.description)}`,
-    'model_provider = "codex-router"',
     `model = ${tomlString(role.model)}`,
     `model_reasoning_effort = ${tomlString(role.reasoningEffort)}`,
     `sandbox_mode = ${tomlString(role.sandboxMode)}`,

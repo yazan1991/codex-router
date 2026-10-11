@@ -692,6 +692,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
     "cliproxy/gpt-6-luna",
     "cliproxy/gpt-6-sol",
     "cliproxy/gpt-6.1-sol",
+    "cliproxy/claude-fable-5-1",
     "deepseek/deepseek-v4-flash",
     "deepseek/deepseek-v4-flash-vision-exp",
     "opencode-go/deepseek-v4-flash",

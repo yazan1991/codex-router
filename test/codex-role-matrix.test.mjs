@@ -27,10 +27,10 @@ test("canonical workforce binds each specialist to an explicit reasoning effort"
 });
 
 test("generic routed workforce has durable deep-reasoning defaults", () => {
-  assert.equal(canonicalRoutedEffort("cliproxy/gpt-6-luna"), "max");
-  assert.equal(canonicalRoutedEffort("cliproxy/gpt-6.1-sol"), "high");
-  assert.equal(canonicalRoutedEffort("cliproxy/gpt-6-astra"), "max");
-  assert.equal(canonicalRoutedEffort("cliproxy/other"), undefined);
+  assert.equal(canonicalRoutedEffort("my-router-codex/gpt-6-luna"), "max");
+  assert.equal(canonicalRoutedEffort("my-router-codex/gpt-6.1-sol"), "high");
+  assert.equal(canonicalRoutedEffort("my-router-codex/gpt-6-astra"), "max");
+  assert.equal(canonicalRoutedEffort("my-router-codex/other"), undefined);
 });
 
 test("role sync writes private canonical files and repairs drift", () => {
@@ -38,6 +38,11 @@ test("role sync writes private canonical files and repairs drift", () => {
   const result = syncCanonicalCodexRoles(agentsDir);
   assert.equal(result.written.length, CANONICAL_NAMED_ROLES.length);
   assert.equal(canonicalCodexRoleStatus(agentsDir).ok, true);
+  for (const role of CANONICAL_NAMED_ROLES) {
+    const contents = readFileSync(path.join(agentsDir, role.fileName), "utf8");
+    assert.doesNotMatch(contents, /^model_provider\s*=/m);
+    assert.match(contents, /^model = "my-router-codex\//m);
+  }
 
   const reviewer = CANONICAL_NAMED_ROLES.find((role) => role.name === "reviewer");
   const target = path.join(agentsDir, reviewer.fileName);

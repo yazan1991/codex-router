@@ -178,8 +178,8 @@ import {
 } from "./namespace-relay.mjs";
 import {
   chatProviderToolSurface,
-  ensureClientToolSearchForCodexAppConnectors,
-  pruneCodexAppConnectorTools,
+  ensureClientToolSearchForMcpNamespaces,
+  pruneMcpNamespaceTools,
   GROQ_MAX_TOOLS,
   GroqToolLimitError,
   GROQ_TOOL_LIMIT_CODE,
@@ -3695,7 +3695,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     provider?.id === "cliproxy-messages" &&
     route.slug.startsWith("cliproxy/claude-")
   ) {
-    clientTools = ensureClientToolSearchForCodexAppConnectors(clientTools).tools;
+    clientTools = ensureClientToolSearchForMcpNamespaces(clientTools).tools;
   }
   const compatibleInput = consoleGoCompatibleInput(
     zenFreeCompatibleInput(
@@ -3842,7 +3842,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     provider?.id === "cliproxy-messages" &&
     route.slug.startsWith("cliproxy/claude-")
   ) {
-    tools = pruneCodexAppConnectorTools(tools).tools;
+    tools = pruneMcpNamespaceTools(tools).tools;
   }
   if (needsNonRecursiveToolSchemaCompatibility(route)) {
     // Run after namespace flattening so both native children and ordinary

@@ -19,12 +19,12 @@ const kimi = {
   displayName: "Kimi K3 (OAuth)",
 };
 
-test("routed agent definitions select the router provider and exact model slug", () => {
+test("routed agent definitions inherit the parent provider and select the exact model slug", () => {
   const definition = routedAgentDefinition(kimi);
   assert.equal(definition.agentName, "router_kimi_oauth_k3");
   assert.equal(definition.fileName, "router-model-kimi-oauth-k3.toml");
-  assert.match(definition.contents, /^# Managed by Codex Router\./);
-  assert.match(definition.contents, /model_provider = "codex-router"/);
+  assert.match(definition.contents, /^# Managed by Codex\+\+ for the active OpenCodex model catalog\./);
+  assert.doesNotMatch(definition.contents, /^model_provider\s*=/m);
   assert.match(definition.contents, /model = "kimi-oauth\/k3"/);
   assert.match(definition.contents, /cite the exact file and line/);
   assert.match(definition.contents, /Before claiming that something is absent/);
@@ -149,10 +149,10 @@ test("only registry-proven models receive routed agent definitions", () => {
 
 test("Astra routed agent is an escalation-only read-only advisor with dynamic effort", () => {
   const definition = routedAgentDefinition({
-    slug: "cliproxy/gpt-6-astra",
-    displayName: "GPT 6 Astra (CLIProxy)",
+    slug: "my-router-codex/gpt-6-astra",
+    displayName: "GPT 6 Astra",
   });
-  assert.match(definition.contents, /escalation-only expert advisor/i);
+  assert.match(definition.contents, /escalation-only expert consultant/i);
   assert.match(definition.contents, /^sandbox_mode = "read-only"$/m);
   assert.match(definition.contents, /Do not use for routine work/i);
   assert.equal(/model_reasoning_effort/.test(definition.contents), false);

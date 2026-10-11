@@ -303,7 +303,7 @@ test("CLIProxy Claude Fable 5.1 publishes the documented default and modalities"
   assert.equal(model.bridgeApplyPatchTool, true);
   assert.equal(model.supportsApplyPatchTool, undefined);
   assert.equal(model.includeSkillsUsageInstructions, false);
-  assert.equal(model.supportsToolSearch, true);
+  assert.deepEqual(model.searchTool, { mode: "standalone" });
   const picker = routedModel(
     {
       slug: "gpt-template",
