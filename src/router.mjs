@@ -2148,7 +2148,23 @@ async function normalizeRoutedAgentInput(request, input, signal, route) {
   if (!Array.isArray(normalized)) return normalized;
   const output = [];
   for (const item of normalized) {
+    const content = Array.isArray(item?.content) ? item.content : [];
+    const partTypes = content
+      .map((part) => (typeof part?.type === "string" ? part.type : "unknown"))
+      .join(",");
+    const encryptedParts = content.filter(
+      (part) => part?.type === "encrypted_content" && typeof part.encrypted_content === "string",
+    );
     const payload = encryptedAgentPayload(item);
+    if (encryptedParts.length > 0) {
+      console.error(
+        `[codex-router] agent_relay_probe route=${route?.slug || "unknown"} ` +
+          `item_type=${item?.type || "unknown"} parts=${partTypes || "none"} ` +
+          `encrypted_parts=${encryptedParts.length} detected=${payload ? "yes" : "no"} ` +
+          `native_token=${payload?.native ? "yes" : "no"} ` +
+          `encrypted_bytes=${payload?.content ? Buffer.byteLength(payload.content, "utf8") : 0}`,
+      );
+    }
     if (!payload) {
       output.push(item);
       continue;
@@ -2156,6 +2172,11 @@ async function normalizeRoutedAgentInput(request, input, signal, route) {
     const plaintext = payload.native
       ? await relayEncryptedAgentPayload(request, item, payload.content, signal, route)
       : payload.content;
+    console.error(
+      `[codex-router] agent_relay_probe route=${route?.slug || "unknown"} ` +
+        `relay=${payload.native ? "selected" : "not_needed"} ` +
+        `plaintext_bytes=${Buffer.byteLength(plaintext, "utf8")} normalized=input_text`,
+    );
     output.push({
       ...item,
       content: [
