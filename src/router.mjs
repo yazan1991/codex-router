@@ -1659,6 +1659,32 @@ async function relayEncryptedAgentPayloadOnce(
     signal,
   });
   if (!upstream.ok) {
+    let upstreamErrorType = "";
+    let upstreamErrorCode = "";
+    let upstreamErrorMessage = "";
+
+    try {
+      const parsed = JSON.parse(Buffer.from(bytes).toString("utf8"));
+      const detail = parsed?.error ?? parsed;
+
+      upstreamErrorType =
+        typeof detail?.type === "string" ? detail.type.slice(0, 200) : "";
+      upstreamErrorCode =
+        typeof detail?.code === "string" ? detail.code.slice(0, 200) : "";
+      upstreamErrorMessage =
+        typeof detail?.message === "string" ? detail.message.slice(0, 500) : "";
+    } catch {
+      upstreamErrorMessage = "<non-json upstream error>";
+    }
+
+    console.error(
+      `[native-collaboration-relay] model=${nativeAgentRelayModel()} ` +
+      `upstream_status=${upstream.status} ` +
+      `error_type=${JSON.stringify(upstreamErrorType)} ` +
+      `error_code=${JSON.stringify(upstreamErrorCode)} ` +
+      `error_message=${JSON.stringify(upstreamErrorMessage)}`,
+    );
+
     const error = new Error(
       `Native collaboration payload relay failed with HTTP ${upstream.status}.`,
     );
